@@ -1,0 +1,212 @@
+#!/bin/bash
+
+# Automated RHEL build tool
+
+# Array of tools (called sequentially w/ options provided)
+declare -a tools=(
+[1]="packages-install"
+[2]="packages-remove"
+[3]="config-serial"
+[4]="disable-rhn"
+[5]="config-grub"
+[6]="disable-selinux"
+[7]="config-ntp"
+[8]="config-sysctl"
+[9]="disable-ipv6"
+[10]="config-audit-rules"
+[11]="config-user-bsm"
+[12]="config-audit-core"
+[13]="config-dns"
+[14]="config-postfix"
+[15]="config-sysstat"
+[16]="config-sshd"
+[17]="config-ssh"
+[18]="config-banner"
+[19]="config-logs-syslog"
+[20]="config-logs-logrotate"
+[21]="config-umask"
+[22]="config-init-mode"
+[23]="config-pam-wheel"
+[24]="config-acct-defaults"
+[25]="config-pam-cracklib"
+[26]="config-pam-unix"
+[27]="config-acct-libuser"
+[28]="config-init-runlevel"
+[29]="config-sudo-defaults"
+[30]="config-sudo-unixadmins"
+[31]="config-sudo-caagents"
+[32]="config-sudo-logs"
+[33]="config-cron-whitelist"
+[34]="config-cron-blacklist"
+[35]="config-kshrc-symlink"
+[36]="config-kshrc-defaults"
+[37]="config-profile"
+[38]="config-user-addmadm"
+[39]="config-sudo-addmadm"
+[40]="config-sudo-eocadmins"
+[41]="config-sudo-netwkadmin"
+[42]="config-services-disable"
+[43]="config-services-enable"
+[44]="config-wheel"
+[45]="config-acct-aging"
+[46]="config-acct-lock"
+[47]="config-acct-shell"
+[48]="check-accounts"
+)
+
+# Get our current working directory
+cwd=$(dirname ${BASH_SOURCE[0]})
+
+# Setup a path for binary tools (just in case)
+PATH=$PATH:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+
+# Make sure our common libraries are available at ${cwd}
+if [ ! -f "${cwd}/scripts/libs/common" ] ; then
+  echo "${prog}: Could not load libraries"
+  exit 1
+fi
+
+# Load our libs from ${cwd}
+source ${cwd}/scripts/libs/common
+
+# Displays available arg list (only common options available)
+usage()
+{
+  cat <<EOF
+Usage $0 [options]
+
+Automated RHEL build validation & configuration toolkit
+
+  Help:
+    -h  Show this message
+    -v  Enable verbosity mode
+
+  Required:
+    -a  Author name (required)
+
+  Validation:
+    -c  Perform validation of change
+
+  Restoration options:
+    -r  Perform rollback of changes
+    -i  Interactive mode, to be used with -r
+
+  Development mode:
+    -t  Run in test mode (assumes test env)
+
+EOF
+}
+
+# Build an arg list
+build_args()
+{
+  local args=
+
+  # Set restoration mode for all scripts
+  [ ${restore} -gt 0 ] && args="${args} -r"
+
+  # Set interactive mode if restoration is true
+  [[ ${restore} -gt 0 ]] && [[ ${interactive} -gt 0 ]] && args="${args} -i"
+
+  # Turn on verbosity
+  [ ${verbose} -gt 0 ] && args="${args} -v"
+
+  # Validate only!
+  [ ${check} -gt 0 ] && args="${args} -c"
+
+  # Use test environment for all functions if it exists
+  [[ ${test} -gt 0 ]] && [[ -d ${cwd}/scripts/test ]] && args="${args} -t"
+
+  # Let user know test environment is missing
+  if [[ ${test} -gt 0 ]] && [[ ! -d ${cwd}/scripts/test ]]; then
+    echo "Test environment missing, exiting" && exit 1
+  fi
+
+  # Pass the author when making changes (for backups)
+  [ "${author}" != "" ] && args="${args} -a ${author}"
+
+  echo "${args}"
+}
+
+# Global options
+verbose=0
+check=0
+restore=0
+test=0
+interactive=0
+prog=$(basename $0)
+
+# Ensure we have permissions
+if [ $UID != 0 ] ; then
+  echo "${prog}: Requires root privileges"
+  exit 1
+fi
+
+# Set variables
+while getopts "ha:vcrti" OPTION ; do
+  case $OPTION in
+    h) usage && exit 1 ;;
+    a) author=$OPTARG ;;
+    v) verbose=1 ;;
+    c) check=1 ;;
+    r) restore=1 ;;
+    t) test=1 ;;
+    i) interactive=1 ;;
+    ?) usage && exit 1 ;;
+  esac
+done
+
+# Make sure we have an author if we are not restoring or validating
+if [[ "${author}" == "" ]] && [[ "${restore}" == 0 ]] && [[ "${check}" == 0 ]]; then
+  echo "${prog}: Must specify an author name (use -a <initials>)"
+  usage
+  exit 1
+fi
+
+# Build the ${arg} list
+args=$(build_args)
+
+# Robot, do work
+for tool in ${!tools[@]}; do
+
+  # Initiate a counter (used to execute ${tools[@]} in order)
+  i=$((i+1))
+
+  # Create ${file} from ${cwd} & ${tools[${i}]}
+  file="${cwd}/scripts/${tools[${i}]}"
+
+  # Verify ${tools[${i}]} exists
+  if [[ ! -f ${file} ]] && [[ "${tools[${i}]}" == "" ]]; then
+
+    # Empty array element at index ${i} or missing ${file}?
+    if [[ ! "${file}" =~ scripts ]]; then
+      echo "${file}"
+    else
+      echo "${prog}: ${file} does not exist"
+    fi
+
+  else
+    # Create a command string
+    cmd="${file}${args}"
+
+    # Show the command/tool with options being called
+    echo "Executing: ${cmd}"
+    echo ""
+
+    # Do work
+    results=$(${cmd})
+
+    # Get the response code and flag as an error or not
+    if [ $? -gt 0 ]; then
+      echo "${prog}: An error occured running '${file}'; details: "
+    else
+      echo "${prog}: '${file}' ran successfully; details:"
+    fi
+
+    # Show details of each tools responses
+    echo "${results}"
+  fi
+
+  echo "==============================================="
+  echo ""
+done

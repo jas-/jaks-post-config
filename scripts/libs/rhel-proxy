@@ -1,0 +1,81 @@
+#!/bin/bash
+
+# File to handle the RHN repository
+proxy_file=/etc/sysconfig/rhn/up2date
+
+# Setup a path for binary tools (just in case)
+PATH=$PATH:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+
+# Proxy setup
+proxy_setup()
+{
+  local proxy="${1}"
+  local user="${2}"
+  local user="${3}"
+
+  # Use test suite if enabled
+  if [ "${test}" == 1 ] ; then
+    file=$(create_test "test/originals/$(basename ${proxy_file})")
+    if [ $? != 0 ] ; then
+      errors+=("ERROR: Error working with test env")
+      echo "${errors[@]}" && return 1
+    fi
+  fi
+
+  # Test for presence of file
+  if [ ! -f ${proxy_file} ]; then
+    errors+=("ERROR: File specified was not found,")
+    echo "${errors[@]}" && return 1
+  fi
+
+  # Perform restoration if specified
+  if [ "${restore}" == 1 ] ; then
+
+    info+=("$(restore "${proxy_file}")")
+
+    # Check results & return if an error occured
+    if [ $? != 0 ]; then
+      echo "${info[@]}" && return 1
+    fi
+
+    # Everything passed, return 0
+    echo "${info[@]}" && return 0
+  fi
+
+  # Backup file if we are making changes
+  if [[ "${check}" == 0 ]] && [[ "${restore}" == 0 ]] ; then
+
+    info+=("$(backup "${proxy_file}" "${author}")")
+
+    # Check results & return if an error occured
+    if [ $? != 0 ]; then
+      echo "${info[@]}" && return 1
+    fi
+  fi
+
+  # Set http_proxy ENV
+  export http_proxy="${proxy}"
+
+  if [[ "${user}" == "" ]] && [[ "${pass}" == "" ]] ; then
+    return 1
+  fi
+
+  # Configure credentials
+  if [ "${check}" == 0 ] ; then
+    str_replace "${proxy_file}" "^proxyUser=" "proxyUser=${puser}"
+    str_replace "${proxy_file}" "^proxyPassword=" "proxyPassword=${ppass}"
+  fi
+
+  return 0
+}
+
+# Proxy tear down
+proxy_teardown()
+{
+  # Unset ENV var for http_proxy
+  export http_proxy=""
+
+  # Remove supplied credentials (regardless of location)
+  str_replace "${proxy_file}" "proxyUser=" "proxyUser="
+  str_replace "${proxy_file}" "proxyPassword=" "proxyPassword="
+}

@@ -1,0 +1,343 @@
+#!/bin/bash
+
+# Common library of functions
+
+# Setup a path for binary tools (just in case)
+PATH=$PATH:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+
+# Get our current working directory
+libs=$(dirname ${BASH_SOURCE[0]})
+
+# Iterate all files in ${libs} & load
+for f in $(ls ${libs}); do
+  lf="${libs}/${f}"
+
+  # Exclude common
+  if [[ -f ${lf} ]] && [[ ! ${lf} =~ common ]]; then
+    source ${lf}
+  fi
+done
+
+# Word wrapping
+#  1 - String
+#  2 - column count
+word_wrap()
+{
+  # Re-assign ${1} to ${text}
+  local text="${1}"
+
+  # Handle the optional width arg
+  local width="$([ "${2}" != "" ] && echo "${2}" || echo 80)"
+
+  # Set ret to empty
+  local ret=
+
+  # Test for the 'fold' tool first as the RHEL kickstart env doesn't use it
+  local exists="$(which fold)"
+
+  # If the 'fold' doesn't exists fake it with awk
+  if [[ $? -ne 0 ]] && [[ -f ${exists} ]]; then
+    ret="$(echo "${text}" | awk -v w="${width}" '{i=0;while(length(substr($0, i, w))){print substr($0, i, w);i+=w}}' | tr '\n' '\\'|sed -e 's|\\| \\ \n\t\t|g')"
+  else
+    # Since 'fold' exists split at spaces of ${width} wide
+    #ret="$(fold -w ${width} -s <(echo "${text}")|tr '\n' '\\'|sed -e 's|\\| \\ \n\t\t|g')"
+    ret="$(fold -w ${width} -s "$(echo "${text}")"|tr '\n' '\\'|sed -e 's|\\| \\ \n\t\t|g')"
+  fi
+
+  echo "${ret%?}"
+}
+
+# String to lower
+#  1 - String
+str_to_lower()
+{
+  echo "${1}"|tr '[:upper:]' '[:lower:]'
+}
+
+# String to upper
+#  1 - String
+str_to_upper()
+{
+  echo "${1}"|tr '[:lower:]' '[:upper:]'
+}
+
+# String replace
+#  1 - File
+#  2 - Pattern (regex)
+#  3 - Replacement string
+#  4 - Optional exclude pattern (regex)
+str_replace()
+{
+  local file="${1}"
+  local pat="${2}"
+  local str="${3}"
+  local excl="${4}"
+
+  # Haystack search using pattern
+  if [ "${excl}" != "" ] ; then
+    needle=$(grep "${pat}" "${file}"|grep -v "${excl}"|head -1)
+  else
+    needle=$(grep "${pat}" "${file}"|head -1)
+  fi
+
+  # Replace or add
+  if [[ "${needle}" =~ ${pat} ]] ; then
+    sed --follow-symlinks -i "s|${needle}|${str}|g" ${file}
+  else
+    echo "${str}" >> ${file}
+  fi
+}
+
+# Use array as replacement using start/stop as needle for haystack ($file)
+#  1 - File
+#  2 - Start pattern (first line)
+#  3 - Stop pattern (end line)
+#  4 - Array of replacement(s)
+str_multiline_array_replace()
+{
+  local file="${1}"
+  local start="${2}"
+  local stop="${3}"
+
+  # Use everything after the first 3 args as our replacement array
+  IFS=' ' read -a repl <<< $(echo "${@:3:${#@}}")
+
+  # Create a haystack from ${start} to ${stop} in ${file}
+  IFS=' ' read -a haystack <<< $(awk -v start="${start}" -v stop="${stop}" '$0 ~ start{print;flag=1;next}$0 ~ stop{flag=0}flag' ${file}|tr '\n' ' ')
+
+  f=$(cat ${file}|tr '\n' ':')
+  h=$(echo "${haystack[@]}"|tr ' ' ':')
+  p=$(echo "${repl[@]}"|tr ' ' ':')
+
+  echo "${f}"|sed -e "s|${h}|${p}|g" | tr ':' '\n' > ${file}
+}
+
+# Flatten file to string & replace
+#  1 - File
+#  2 - Pattern (regex)
+#  3 - Replacement string
+flatten_to_replace()
+{
+  local file="${1}"
+  local pat="${2}"
+  local repl="${3}"
+  local strip="${4}"
+  local end="$([ "${5}" == "" ] && echo 0 || echo "${5}")"
+
+  # Cleanup the file first (removes commented lines)
+  if [ "${strip}" != "" ] ; then
+    sed --follow-symlinks -i '/^#/ d' ${file}
+  fi
+
+  # Create a string from the file by replacing line endings
+  local all=$(cat "${file}"|tr '\n' ':')
+
+  # Search for pattern within original file
+  local pattern=$(cat "${file}"|grep "${pat}"|tr '\n' ':')
+
+  # Create an array of lines matching our supplied pattern
+  IFS=":" read -a arr <<< "${pattern}"
+
+  str=""
+  int=0
+
+  # Iterate our matched lines array
+  for item in "${arr[@]}" ; do
+    if [ $int -eq $((${#arr[@]}-1)) ] ; then
+
+      # Add to begning or end?
+      if [ ${end} -ne 1 ]; then
+        str="${str}:${repl}:${item}"
+      else
+        str="${repl}:${str}:${item}"
+      fi
+    else
+      str=$([ "${str}" != "" ] && echo "${str}:${item}" || echo "${item}")
+    fi
+    int=$((int+1))
+  done
+
+  local str="${str}:"
+
+  # Convert string back to file (with line endings)
+  echo "${all}" | sed -e "s|${pattern}|${str}|g" | tr ':' '\n' > ${file}
+}
+
+# Multi-line replacer for associative arrays
+#  1 - File to work with
+#  2 - Type (limited to Host_Alias, User_Alias & Cmnd_Alias)
+#  3 - Associative array
+#  4 - Attempt to wrap lines
+assoc_multi_line_replace()
+{
+  local file="${1}"
+  local type="${2}"
+  eval "declare -A obj="${3#*=}
+  local wrap=$([ ! -z ${4} ] && echo ${4} || echo 0)
+
+  # Since our caller should expect some output
+  local info=()
+
+  # Just in case something breaks
+  local err=0
+
+  # Generate a haystack from $file} using \ to wrap lines
+  haystack=$(grep -FA1 \\ ${file})
+
+  # Loop over ${obj[@]} and handle all elements
+  for alias in ${!obj[@]}; do
+
+    # Create a pattern from ${alias}
+
+    # Create ${temp} & ${pattern} based on ${type} arg
+    if [ "${type}" == "" ]; then
+      temp="${alias}    ${obj[${alias}]}"
+      pattern="^${alias}.*"
+    else
+      if [ "${obj[${alias}]}" == "" ]; then
+        temp="${type}    ${alias}"
+      else
+        temp="${type}    ${alias}=${obj[${alias}]}"
+      fi
+      pattern="^${type}.*${alias}.*"
+    fi
+
+    # Ensure our ${obj[${alias}]} is wrapped @ 60 chars for readability
+    #if [ ${wrap} -eq 1 ]; then
+    #  value=$(word_wrap "${temp}" 60)
+    #else
+      value="${temp}"
+    #fi
+
+    # Try to get a ${haystack} one last time
+    if [[ "${haystack}" == "" ]] || [[ ! "${haystack}" =~ ${pattern} ]]; then
+      haystack=$(grep "${pattern}" ${file})
+    fi
+
+    # Make change for the specified ${obj[${alias}]}
+    if [ "${check}" == 0 ]; then
+
+      info+=("INFO: Making change for ${type} (${alias}),")
+
+      # We need a pattern for str_replace
+      if [ "${haystack}" == "" ]; then
+        haystack="${pattern}"
+      fi
+
+      # Do it
+      str_replace "${file}" "${haystack}" "${value}"
+    fi
+
+    # Validate ${alias} (${obj[${alias}]})
+    info+=("INFO: Validating ${type} (${alias}),")
+    chk=$(grep "${pattern}" ${file})
+    if [ "${chk}" == "" ]; then
+      info+=("ERROR: Could not validate ${type} (${alias}),")
+      err=1
+    fi
+  done
+
+  echo "${info[@]}"
+  return ${err}
+}
+
+# Search array
+function in_array()
+{
+  local args=("${@}")
+  local needle="${args[0]}"
+  local haystack=("${args[@]:1}")
+
+  for i in ${haystack[@]}; do
+    if [[ ${i} == ${needle} ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+# Robot, do work
+#   1 - Function to call and do work on
+main()
+{
+  # Arg 1 is our function to call
+  local subroutine="${1}"
+
+  # Call subroutine & handle returns (cannot be local in scope)
+  info=("$(${subroutine})")
+  local ret=$?
+
+  # Be verbose if asked
+  if [ "${verbose}" == 1 ] ; then
+
+    # Header for verbose messages
+    echo "${prog}: Informational messages"
+
+    # Convert to an array
+    IFS=',' read -a iobj <<< "${info}"
+
+    # Iterate verbose messages
+    for i in "${iobj[@]}" ; do
+
+      if [ "${i}" != "" ]; then
+
+        # Strip preceeding spaces
+        item="$(echo "${i}"|sed -e 's/^[ \t]*//')"
+        echo "  ${item}"
+      fi
+    done
+
+    echo ""
+  fi
+
+  # Handle return
+  if [ "${ret}" != 0 ] ; then
+
+    # Header for errors
+    echo "${prog}: Errors found"
+
+    # Iterate error messages
+    for err in "${ret}" ; do
+      echo "  ${err}"
+    done
+
+    exit 1
+  fi
+
+  # All checks passed
+  echo "${prog}: Ok"
+  exit 0
+}
+
+# Create copy for test subroutines
+#  1 - File to use
+#  2 - Create file if it doesn't exist?
+create_test()
+{
+  local file="${1}"
+  local name=$(basename ${file})
+  local cwd=$(dirname ${file})
+  local test_dir="$(echo "${cwd}"|sed -e 's|originals|modified|g')"
+
+  if [[ ! -f "${file}" ]] && [[ -z ${2} ]]; then
+    return 1
+  else
+    bogus=$(touch ${file})
+    if [ $? -ne 0 ]; then
+      return 1
+    fi
+  fi
+
+  # If a test file exists don't over write it. Use it.
+  if [ ! -f ${test_dir}/${name} ]; then
+    ret=$(cp "${file}" "${test_dir}/${name}" 2> /dev/null)
+  fi
+
+  if [[ $? -ne 0 ]] || [ ! -f "${test_dir}/${name}" ] ; then
+    return 1
+  fi
+
+  echo "${test_dir}/${name}"
+  return 0
+}

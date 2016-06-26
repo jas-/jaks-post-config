@@ -1,0 +1,231 @@
+#!/bin/bash
+
+# Array of services to disable
+SVCS=(auditd ntpd rsyslog)
+
+# Get our current working directory
+cwd=$(dirname ${BASH_SOURCE[0]})
+
+# Setup a path for binary tools (just in case)
+PATH=$PATH:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+
+# Make sure our common libraries are available
+if [ ! -f "${cwd}/libs/common" ] ; then
+  echo "${prog}: Could not load libraries"
+  exit 1
+fi
+
+# Load our libs
+source ${cwd}/libs/common
+
+# Displays available arg list
+usage()
+{
+  cat <<EOF
+Usage $0 [options]
+
+Enaables specified services for common run levels
+
+  Help:
+    -h  Show this message
+    -v  Enable verbosity mode
+
+  Validation:
+    -c  Perform validation of change
+
+  Restoration options:
+    -r  Perform rollback of changes
+
+EOF
+}
+
+# Make use of systemd if it exists
+config_sysd()
+{
+  local svc="${1}"
+
+  # Exit if systemd is not used
+  local sysd=$(which systemctl|grep -v "no systemctl")
+  if [ "${sysd}" == "" ]; then
+    return 0
+  fi
+
+  # Check to see if service exists in systemd
+  local serv=$(systemd -t service --state=ACTIVE|grep "${svc}")
+  if [ "${serv}" == "" ]; then
+    return 0
+  fi
+
+  # Enable/Disable specified service
+  if [ "${restore}" == 1 ] ; then
+    systemctl "${svc}" enable 2&> /dev/null
+    systemctl "${svc}" start 2&> /dev/null
+  else
+    systemctl "${svc}" disable 2&> /dev/null
+    systemctl "${svc}" stop 2&> /dev/null
+  fi
+
+  return $?
+}
+
+# Helper to enable/disable service
+config_svc_service()
+{
+  local svc="${1}"
+
+  # Enable/Disable specified service
+  if [ "${restore}" == 0 ] ; then
+    service "${svc}" start 2&> /dev/null
+  else
+    service "${svc}" stop 2&> /dev/null
+  fi
+
+  return $?
+}
+
+# Helper to enable/disable runlevel
+config_svc_runlevel()
+{
+  local svc="${1}"
+
+  # Enable/Disable runlevel for service
+  if [ "${restore}" == 0 ] ; then
+    chkconfig "${svc}" on 2&> /dev/null
+  else
+    chkconfig "${svc}" off 2&> /dev/null
+  fi
+
+  return $?
+}
+
+# Apply service run level changes
+config_svcs()
+{
+  local SVCS="${@}"
+
+  # Error array
+  local errors=()
+
+  # Global info array
+  local info=()
+
+  # Disable services loop
+  for svc in ${SVCS[@]}; do
+
+    # Provide some verbosity
+    if [ "${check}" == 1 ]; then
+      info+=("INFO: Validating ${svc} (${mode}),")
+    else
+      info+=("INFO: ${action} ${svc},")
+    fi
+
+    # Make sure the service exists prior to flagging a failure
+    chk=$(chkconfig|awk -v svc="^${svc}$" 'match($1, svc){print}')
+    if [[ "${check}" == 0 ]] && [[ "${chk}" == "" ]]; then
+      info+=("INFO: ${svc} does not exist in any runlevel; skipping,")
+      continue
+    fi
+
+    # Make specified change to run level if it exists ${chk2} & doesn't meet ${chk1}
+    if [[ "${check}" == 0 ]] && [[ "${chk}" != "" ]]; then
+      info+=("INFO: Enabling the ${svc} service,")
+      config_svc_runlevel "${svc}"
+      if [ $? -ne 0 ]; then
+        errors+=("ERROR: Error occured enabling ${svc},")
+      fi
+    fi
+
+    # Determine a mode for awk to use as a ${mode}
+    [ "${mode}" == "enabled" ] && mode_cur="on" || mode_cur="off"
+
+    # Validate change in service according to ${mode_cur} for runlevels 3, 4 & 5
+    chk1=$(chkconfig|awk -v svc="${svc}" -v mode="${mode_cur}" '$1 ~ svc && $5 ~ mode && $6 ~ mode && $7 ~ mode{print "ok"}')
+
+    # Ensure ${chk1} is met
+    if [[ "${chk1}" != "ok" ]] && [[ "${chk}" != "" ]]; then
+      errors+=("ERROR: Could not enable ${svc},")
+    fi
+
+    # Determine state of ${svc}
+    state=$(ps xaf|grep "${svc}"|grep -v "grep"|grep -v "\[")
+
+    # Make specified change to service
+    if [[ "${check}" == 0 ]] && [[ "${state}" == "" ]] ; then
+      info+=("INFO: Stopping the ${svc} process,")
+      config_svc_service "${svc}"
+      if [ $? -ne 0 ]; then
+        errors+=("ERROR: Error occured stopping ${svc},")
+      fi
+    fi
+
+    # Validate change to service
+    #chk=$(ps a | grep "${svc}" | grep -v "grep" | grep -v "\[")
+    chk=$(ps xaf | grep -v "grep"|awk -v svc="/${svc}/" '{if (match($5, svc, obj)){print $5}}')
+    if [ "${chk}" != "" ] ; then
+      errors+=("ERROR: Could not shut down ${svc},")
+    fi
+  done
+
+  # Return errors
+  if [ "${#errors[@]}" != 0 ] ; then
+    errors+=("${info[@]}")
+    echo "${errors[@]}" && return 1
+  fi
+
+  # Expose information array
+  echo "${info[@]}"
+
+  # Return code
+  return 0
+}
+
+# Main service handling function
+config_services()
+{
+  mode="enabled"
+  [ "${restore}" == 0 ] && action="Starting" || action="Stopping"
+  info+=("$(config_svcs "${SVCS[@]}")")
+  if [ $? != 0 ]; then
+    errors+=("${info}")
+  fi
+
+  # Return errors
+  if [ "${#errors[@]}" != 0 ] ; then
+    echo "${errors[@]}" && return 1
+  fi
+
+  # Expose information array
+  echo "${info[@]}"
+
+  # Return code
+  return 0
+}
+
+# Global options
+verbose=0
+check=0
+restore=0
+test=0
+prog=$(basename $0)
+
+# Ensure we have permissions
+if [ $UID != 0 ] ; then
+  echo "${prog}: Requires root privileges"
+  exit 1
+fi
+
+# Set variables (-t & -a does nothing)
+while getopts "hvcrta:" OPTION ; do
+  case $OPTION in
+    h) usage && exit 1 ;;
+    v) verbose=1 ;;
+    c) check=1 ;;
+    r) restore=1 ;;
+    t) bogus=1 ;;
+    a) bogus=1 ;;
+    ?) usage && exit 1 ;;
+  esac
+done
+
+# Robot, do work
+main "config_services"

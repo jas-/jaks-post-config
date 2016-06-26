@@ -1,0 +1,162 @@
+#!/bin/bash
+
+# File to use
+file=/SERIAL_NUMBER
+
+# Get our current working directory
+cwd=$(dirname ${BASH_SOURCE[0]})
+
+# Setup a path for binary tools (just in case)
+PATH=$PATH:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+
+# Make sure our common libraries are available
+if [ ! -f "${cwd}/libs/common" ] ; then
+  echo "${prog}: Could not load libraries"
+  exit 1
+fi
+
+# Load our libs
+source ${cwd}/libs/common
+
+# Displays available arg list
+usage()
+{
+  cat <<EOF
+Usage $0 [options]
+
+Obtain and populates the /SERIAL_NUMBER file
+
+  Help:
+    -h  Show this message
+    -v  Enable verbosity mode
+
+  Required:
+    -a  Author name (required)
+
+  Options:
+    -F  File to use
+
+  Validation:
+    -c  Perform validation of change
+
+  Restoration options:
+    -r  Perform rollback of changes
+    -i  Interactive mode, to be used with -r
+
+  Development mode:
+    -t  Run in test mode (assumes test env)
+
+EOF
+}
+
+config_serial()
+{
+  # Error array
+  errors=()
+
+  # Global info array
+  info=()
+
+  # Use test suite if enabled
+  if [ "${test}" == 1 ] ; then
+    file=$(create_test "${cwd}/test/originals/$(basename ${file})")
+    if [ $? != 0 ] ; then
+      errors+=("ERROR: Error working with test env")
+      echo "${errors[@]}" && return 1
+    fi
+  fi
+
+  # Test for presence of file & make it if it doesn't exist
+  if [ ! -f ${file} ]; then
+    touch ${file}
+  fi
+
+  # Perform restoration if specified
+  if [ "${restore}" == 1 ] ; then
+
+    info+=("$(restore "${file}")")
+
+    # Check results & return if an error occured
+    if [ $? != 0 ]; then
+      echo "${info[@]}" && return 1
+    fi
+
+    # Everything passed, return 0
+    echo "${info[@]}" && return 0
+  fi
+
+  # Backup file if we are making changes
+  if [[ "${check}" == 0 ]] && [[ "${restore}" == 0 ]] ; then
+
+    info+=("$(backup "${file}" "${author}")")
+
+    # Check results & return if an error occured
+    if [ $? != 0 ]; then
+      echo "${info[@]}" && return 1
+    fi
+  fi
+
+  # Get the system serial number
+  sn="$(dmidecode -s system-serial-number)"
+
+  if [ "${check}" == 0 ]; then
+    info+=("INFO: Populating ${file} with system identification,")
+
+    echo "${sn}" > ${file}
+  fi
+
+  info+=("INFO: Validating ${sn} in ${file},")
+  if [ "$(grep "${sn}" ${file})" == "" ]; then
+    errors+=("ERROR: Invalid ${sn} found in ${file},")
+  fi
+
+  # Return errors
+  if [ "${#errors[@]}" != 0 ] ; then
+    echo "${errors[@]}" && return 1
+  fi
+
+  # Expose information array
+  echo "${info[@]}"
+
+  # Return code
+  return 0
+}
+
+# Global options
+verbose=0
+check=0
+restore=0
+test=0
+interactive=0
+prog=$(basename $0)
+
+# Ensure we have permissions
+if [ $UID != 0 ] ; then
+  echo "${prog}: Requires root privileges"
+  exit 1
+fi
+
+# Set variables
+while getopts "ha:vcrtif:" OPTION ; do
+  case $OPTION in
+    h) usage && exit 1 ;;
+    a) author=$OPTARG ;;
+    f) file=$OPTARG ;;
+    v) verbose=1 ;;
+    c) check=1 ;;
+    r) restore=1 ;;
+    t) test=1 ;;
+    i) interactive=1 ;;
+    ?) usage && exit 1 ;;
+  esac
+done
+
+# Make sure we have an author if we are not restoring or validating
+if [[ "${author}" == "" ]] && [[ "${restore}" == 0 ]] && [[ "${check}" == 0 ]]; then
+  echo "${prog}: Must specify an author name (use -a <initials>)"
+  usage
+  exit 1
+fi
+
+# Robot, do work
+main "config_serial"

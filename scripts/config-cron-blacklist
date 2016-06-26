@@ -1,0 +1,176 @@
+#!/bin/bash
+
+# Define the file to use for the blacklist
+file=/etc/cron.deny
+
+# Array of accounts on blacklist
+CRON_DENY=(daemon bin nuucp listen nobody noaccess adm gdm lp nobody4 smmsp uucp webservd)
+
+# Get our current working directory
+cwd=$(dirname ${BASH_SOURCE[0]})
+
+# Setup a path for binary tools (just in case)
+PATH=$PATH:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+
+# Make sure our common libraries are available
+if [ ! -f "${cwd}/libs/common" ] ; then
+  echo "${prog}: Could not load libraries"
+  exit 1
+fi
+
+# Load our libs
+source ${cwd}/libs/common
+
+# Displays available arg list
+usage()
+{
+  # Build types based on configuration files available
+  builds=$(gen_builds)
+
+  cat <<EOF
+Usage $0 [options]
+
+Configure cron blacklist
+
+  Help:
+    -h  Show this message
+    -v  Enable verbosity mode
+
+  Required:
+    -a  Author name (required)
+
+  Options:
+    -f  File to use
+
+  Validation:
+    -c  Perform validation of change
+
+  Restoration options:
+    -r  Perform rollback of changes
+    -i  Interactive mode, to be used with -r
+
+  Development mode:
+    -t  Run in test mode (assumes test env)
+
+EOF
+}
+
+# Apply blacklist of accounts to cron daemon
+cron_deny()
+{
+  # Set action state
+  if [ "${check}" == 1 ] ; then
+    state="Validating"
+  else
+    state="Adding"
+  fi
+
+  # Use test suite if enabled
+  if [ "${test}" == 1 ] ; then
+    file=$(create_test "${cwd}/test/originals/$(basename ${file})" 1)
+    if [ $? != 0 ] ; then
+      errors+=("ERROR: Error working with test env,")
+      echo "${errors[@]}" && return 1
+    fi
+  fi
+
+  # Create the blacklist file if it doesn't exist
+  if [ ! -f "${file}" ] ; then
+    info+=("INFO: Creating ${file},")
+    touch ${file}
+    chmod 0644 ${file}
+  fi
+
+  # Perform restoration if specified
+  if [ "${restore}" == 1 ] ; then
+
+    info+=("$(restore "${file}")")
+
+    # Check results & return if an error occured
+    if [ $? != 0 ]; then
+      echo "${info[@]}" && return 1
+    fi
+
+    # Everything passed, return 0
+    echo "${info[@]}" && return 0
+  fi
+
+  # Backup file if we are making changes
+  if [[ "${check}" == 0 ]] && [[ "${restore}" == 0 ]] ; then
+
+    info+=("$(backup "${file}" "${author}")")
+
+    # Check results & return if an error occured
+    if [ $? != 0 ]; then
+      echo "${info[@]}" && return 1
+    fi
+  fi
+
+  # Loop over configured denied users
+  if [ "${#CRON_DENY[@]}" -gt 0 ] ; then
+    for item in "${CRON_DENY[@]}"; do
+      info+=("INFO: ${state} ${item},")
+
+      # Don't make change unless specified
+      if [ "${check}" == 0 ] ; then
+        str_replace "${file}" "^${item}" "${item}"
+      fi
+
+      # Validate change
+      chk=$(grep ^${item} ${file})
+      if [ "${chk}" == "" ] ; then
+        errors+=("ERROR: Error ${state} ${item},")
+      fi
+    done
+  fi
+
+  # Return errors
+  if [ "${#errors[@]}" != 0 ] ; then
+    errors+=("${info[@]}")
+    echo "${errors[@]}" && return 1
+  fi
+
+  # Expose information array
+  echo "${info[@]}"
+
+  # Return code
+  return 0
+}
+
+# global vars
+verbose=0
+check=0
+restore=0
+interactive=0
+test=0
+prog=$(basename $0)
+
+# Ensure we have permissions
+if [ $UID != 0 ] ; then
+  echo "${prog}: Requires root privileges"
+  exit 1
+fi
+
+# Set variables
+while getopts "hvcrtif:a:" OPTION ; do
+  case $OPTION in
+    h) usage && exit 1 ;;
+    f) file=$OPTARG ;;
+    a) author=$OPTARG ;;
+    v) verbose=1 ;;
+    c) check=1 ;;
+    r) restore=1 ;;
+    t) test=1 ;;
+    i) interactive=1 ;;
+    ?) usage && exit 1 ;;
+  esac
+done
+
+# Make sure we have an author if we are not restoring or validating
+if [[ "${author}" == "" ]] && [[ "${restore}" == 0 ]] && [[ "${check}" == 0 ]]; then
+  echo "${prog}: Must specify an author name (use -a <initials>)"
+  usage
+  exit 1
+fi
+
+main "cron_deny"

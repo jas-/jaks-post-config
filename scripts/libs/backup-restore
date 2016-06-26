@@ -1,0 +1,202 @@
+#!/bin/bash
+
+# Setup a path for binary tools (just in case)
+PATH=$PATH:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+
+# Backup specified file
+#  1 - File to backup
+#  2 - Name
+bckup()
+{
+  local file="${1}"
+  local name=$([ "${2}" != "" ] && echo "${2}" || echo "auto")
+  local dte=$(date +%Y%m%d-%H%M%S)
+
+  # Obtain current permissions and create new empty file with same perms
+  local dir_perm=$(stat -c %a $(dirname ${file}))
+  local perm=$(stat -c %a ${file})
+  local owner=$(stat -c %u:%g ${file})
+
+  # Don't backup if ${dir_perm} < 600
+  if [ ${dir_perm} -lt 600 ]; then
+     return 0
+  fi
+
+  # Copy file or return error
+  if [ -f "${file}" ] ; then
+    suppress_output=$((cp "${file}" "${file}.${name}-${dte}") 2> /dev/null)
+  else
+    echo "${prog}: ${file} does not exist" && return 1
+  fi
+
+  # Ensure backup occured
+  if [ ! -f "${file}.${name}-${dte}" ] ; then
+    echo "${prog}: Could not create backup of ${file}" && return 1
+  fi
+
+  # Set the original permissions on the backup
+  chmod ${perm} "${file}.${name}-${dte}"
+  chown ${owner} "${file}.${name}-${dte}"
+
+  # Return Ok
+  return 0
+}
+
+# Find file(s)
+#  1 - File to restore
+rstore_search()
+{
+  local file=$(basename "${1}")
+  local base=$(dirname "${1}")
+
+  # If no base provided search from root (slow)
+  if [ "${base}" = "" ] ; then
+    base="/"
+  fi
+
+  # Do the search
+  local found=($(find ${base} -name "${file}.*-*"|sort))
+
+  echo "${found[@]}"
+}
+
+# Find & restore latest backup configuration file
+#  1 - File to restore
+#  2 - Program name
+rstore_interactive()
+{
+  local file="${1}"
+  local prog="${2}"
+
+  # Errors array
+  local errors=()
+
+  # Information array
+  local info=()
+
+  # Send file to our search subroutine
+  local found=$(rstore_search "${file}")
+
+  # Create prompt
+  PS3="Select file to restore: "
+
+  # Add exit item to menu
+  found+=(" Exit")
+
+  # Provide selections for user
+  select name in ${found[@]} ; do
+
+    # Handle exit & provide information
+    if [ "${name}" == "Exit" ] ; then
+      info+=("${prog} Exiting at users request")
+      echo "${info[@]}" && return 1
+    fi
+
+    info+=("INFO: Restoring ${name}")
+
+    # Perform restoration on selected file
+    res=$(rstore_helper "${name}" "${file}")
+
+    # Handle response
+    if [ $? != 0 ] ; then
+      errors+=("ERROR: ${rst}")
+      echo "${errors[@]}" && return 1
+    fi
+
+    return 0
+  done
+}
+
+# Find & restore latest backup configuration file
+#  1 - File to restore
+rstore()
+{
+  local file="${1}"
+
+  # Send file to our search subroutine
+  local found=$(rstore_search "${file}")
+
+  # Pick the last item in array as pre-sorted last element
+  local restore="${found[${#found[@]}-1]}"
+
+  # Restore provides return code for procedure
+  rstore_helper "${restore}" "${file}"
+}
+
+# Restores specified backup file
+#  1 - Backup file
+#  2 - Original filename of backed up file
+rstore_helper()
+{
+  local bckup="${1}"
+  local orig="${2}"
+
+  # Off chance backup procedure
+  if [ -f "${orig}" ] ; then
+    bckup "${orig}" "backup"
+  fi
+
+  # Specified backup file does not exist
+  if [ ! -f "${bckup}" ] ; then
+    echo "${bckup} does not exist" && return
+  fi
+
+  # Restore the file
+  cp "${bckup}" "${orig}"
+
+  return 0
+}
+
+# Perform backup of specified file
+#  1 - File path
+#  2 - Author initials
+backup()
+{
+  local file="${1}"
+  local author="${2}"
+
+  local info=()
+
+  info+=("INFO: Backing up ${file},")
+
+  # Perform backup of file
+  bu=$(bckup ${file} ${author})
+
+  # Validate response
+  if [ $? != 0 ] ; then
+    info+=("${bu}")
+
+    # Expose information array & return 1 for error
+    echo "${info[@]}" && return 1
+  fi
+
+  # Expose information array & return 0 for non-errors
+  echo "${info[@]}" && return 0
+}
+
+# Initiate restoration procedures
+#  1 - File path
+restore()
+{
+  local file="${1}"
+
+  local info=()
+
+  # Perform file restoration
+  if [ "${interactive}" == 1 ] ; then
+    rst=$(rstore_interactive "${file}")
+  else
+    rst=$(rstore "${file}")
+  fi
+
+  # Handle error response
+  if [ $? != 0 ] ; then
+    info+=("INFO: ${rst}")
+    echo "${info[@]}" && return 1
+  fi
+
+  info+=("INFO: Restored ${file},")
+
+  # Expose ${info[@]} array and return success
+  echo "${info[@]}" && return 0
+}

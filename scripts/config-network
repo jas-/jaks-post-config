@@ -1,0 +1,448 @@
+#!/bin/bash
+
+# Set our PCI path prefix
+pci_prefix="/sys/bus/pci/devices/0000:"
+
+# Set ${path} to folder & file prefix for slave configurations
+path="/etc/sysconfig/network-scripts/ifcfg-"
+
+# Set directory & file permissions to ensure accuracy
+dir_perms=755
+file_perms=754
+
+# Create a template for slave configurations (${slave_config})
+read -d '' slave_config <<"EOF"
+DEVICE={INODE}
+BOOTPROTO=none
+ONBOOT=yes
+MASTER=bond0
+SLAVE=yes
+USERCTL=no
+HWADDR={HWADDR}
+EOF
+
+# Create a template for the bond / primary (singularity) configuration (${primary_config})
+read -d '' primary_config <<"EOF"
+DEVICE={INODE}
+IPADDR={IPADDR}
+NETMASK={NETMASK}
+GATEWAY={GATEWAY}
+ONBOOT=yes
+BOOTPROTO=none
+USRCTL=no
+BONDING_OPTS="mode=1 miimon=100"
+EOF
+
+# Get our current working directory
+cwd=$(dirname ${BASH_SOURCE[0]})
+
+# Setup a path for binary tools (just in case)
+PATH=$PATH:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+
+# Make sure our common libraries are available
+if [ ! -f "${cwd}/libs/common" ] ; then
+  echo "${prog}: Could not load libraries"
+  exit 1
+fi
+
+# Load our libs
+source ${cwd}/libs/common
+
+# Error array
+errors=()
+
+# Global info array
+info=()
+
+
+# Displays available arg list
+usage()
+{
+  cat <<EOF
+Usage $0 [options]
+
+Configure network while auto-assembling 802.1 configuration if multiple
+physical adapters present
+
+  Help:
+    -h  Show this message
+    -v  Enable verbosity mode
+
+  Required:
+    -a  Author name (required)
+
+  Options:
+    -n  IP address
+    -s  Subnet address
+    -g  Gateway address
+
+  Validation:
+    -c  Perform validation of change
+
+  Restoration options:
+    -r  Perform rollback of changes
+    -i  Interactive mode, to be used with -r
+
+  Development mode:
+    -t  Run in test mode (assumes test env)
+
+EOF
+}
+
+# Restoration functionality
+function dorestore()
+{
+  # Make copy of ${1} as ${file}
+  file="${1}"
+
+  # Ensure the file/path is a valid file
+  if [ ! -f ${file} ]; then
+    info+=("INFO: File ${file} not found,")
+    echo "${info[@]}" && return 1
+  fi
+  
+  # Perform restoration if specified
+  if [ "${restore}" == 1 ] ; then
+  
+    info+=("$(restore "${file}")")
+  
+    # Check results & return if an error occured
+    if [ $? != 0 ]; then
+      echo "${info[@]}" && return 1
+    fi
+  fi
+
+  return 0
+}
+
+
+# Backup functionality
+function dobackup()
+{
+  # Make copy of ${1} as ${file}
+  file="${1}"
+
+  # Ensure the file/path is a valid file
+  if [ ! -f ${file} ]; then
+    errors+=("ERROR: File ${file} not found,")
+    echo "${errors[@]}" && return 1
+  fi
+
+  # Backup file if we are making changes
+  if [[ "${check}" == 0 ]] && [[ "${restore}" == 0 ]] ; then
+  
+    info+=("$(backup "${file}" "${author}")")
+  
+    # Check results & return if an error occured
+    if [ $? != 0 ]; then
+      echo "${info[@]}" && return 1
+    fi
+  fi
+}
+
+
+# Get adapter list based on /sys/class/net items (vmware loads under USB?)
+function get_slave_devices_vm()
+{
+  local pci_devices=/sys/class/net
+
+  # Create an empty results array
+  local results=()
+
+  # Populate ${inodes[@]} from /sys/class/net
+  local inodes=($(ls -l ${pci_devices}|awk '$0 !~ /total/ && $0 !~ /lo/{print $11}'))
+
+  # Ensure ${#inodes[@]} > 0
+  if [ ${#inodes[@]} -gt 0 ]; then
+
+    # Iterate ${inodes[@]}
+    for node in ${inodes[@]}; do
+
+      # Get the hwaddr from ${node}/address
+      results+=("$(basename "${node}")-$(cat $(readlink -mf "${pci_devices}"/"${node}"/address))")
+    done
+  fi
+
+  echo "${results[@]}"
+}
+
+
+# Get bus:slot:0 list of ethernet adapters for 802.1 bonding assembly
+function get_slave_devices() {
+
+  # Obtain list of ethnet controllers on the system
+  local inodes=($(lspci|grep Ether|awk '{print $1}'))
+  
+  # Get list of bus:slot:device as ${phys[@]} (determines bonding priority)
+  local phys=($(lspci -tv|grep Ether|awk '{if (match($1, /.*+-([0-9]+)\..*\[([0-9]+)\].*(\w\w+\.\w+).*/, obj)){print obj[1]":"obj[2]":"obj[3]}}'))
+
+  # If ${#phys[@]} == 1 try harder & skip to skip bus:slot priority
+  if [ ${#phys[@]} -eq 0 ]; then
+    phys+=($(get_slave_devices_vm))
+    echo "${phys[@]}" && return 0
+  fi
+
+  # If ${#phys[@]} < 0 but > 2, Get one more interface (should be bus:00.1)
+  if [[ ${#phys[@]} -gt 0 ]] && [[ ${#phys[@]} -lt 2 ]]; then
+    phys+=($(lspci -tv|grep Ether|awk '{if (match($1, /.*+-([0-9]+)\..*\[([0-9]+)\].*(\w\w+\.\w+).*/, obj)){getline;if (match($0, /.*+-([0-9]+\.[0-9]+).*/, obj2)){print $0;print obj[1]":"obj2[1]}}}'))
+  fi
+
+  # Placeholder for final array
+  local network_devices=()
+
+  # Validate ${inodes[@]} > 0 (or we can't create an 802.1 bonded interface)
+  if [ ${#inodes[@]} -eq 0 ]; then
+    errors+=("${info[@]}")
+    errors+=("ERROR: No physical or VM ethernet channels found... aborting,")
+    echo "${errors[@]}" && return 1
+  fi
+
+  # Iterate ${inodes[@]} & gather up the address & place in ${hwaddr[@]}
+  for inode in ${inodes[@]}; do
+
+    # Set ${path} = ${pci_prefix}${inode}/net
+    local path="${pci_prefix}${inode}/net/"
+
+    # Assign the contents of ${path}/* as ${dev[@]}
+    if [ -d "${pci_prefix}${inode}/net" ]; then
+      IFS=' ' read -a dev <<< "$(ls ${path})"
+    fi
+
+    # Only iterate ${dev[@]} if > 0
+    if [ ${#dev[@]} -gt 0 ]; then
+
+      # Iterate ${dev[@]}; gather hwaddr
+      for devs in ${dev[@]}; do
+
+        # Iterate ${phys[@]} and use ${oid} as pattern
+        for oid in ${phys[@]}; do
+
+          # If ${devs} as a pattern exists in ${phys[@]} (${oid}) assign ${i}
+          if [ "${inode}" == "${oid:3:${#oid}}" ]; then
+
+            info+=("INFO: ${devs} found @ ${oid}; using as slave,")
+
+            # Since ${inode} is bus:slot:0 assign to ${network_devices[@]} as slave
+            network_devices+=("${devs}-$(cat ${path}/${devs}/address)")
+          fi
+        done
+      done
+    fi
+  done
+
+  echo "${network_devices[@]}"
+  return 0
+}
+
+
+# Generate 802.1 slave configurations
+function create_slave()
+{
+  # Create local copy of ${1} as ${slaves}
+  local slave="${1}"
+
+  # Create the folder based on $(dirname ${path}) if it isn't there
+  if [ ! -d "$(dirname ${path})" ]; then
+    mkdir -p "$(dirname ${path})"
+    chmod ${dir_perms} $(dirname ${path})
+  fi
+
+  # Split ${slave} into ${inode} & ${hwaddr} values
+  local inode=$(echo "${slave}"|awk '{split($0, obj, "-");print obj[1]}')
+  local hwaddr=$(echo "${slave}"|awk '{split($0, obj, "-");print obj[2]}')
+
+  # Assign ${path}${inode} as ${file} for brevity
+  local file="${path}${inode}"
+
+  # Use test suite if enabled
+  if [ "${test}" == 1 ] ; then
+    file=$(create_test "${cwd}/test/originals/$(basename ${file})" 1)
+    if [ $? != 0 ] ; then
+      errors+=("${info[@]}")
+      errors+=("ERROR: Error working with test env for ${file},")
+      echo "${errors[@]}" && return 1
+    fi
+  fi
+
+  # If asked, go through the restoration process
+  if [ "${restore}" == 1 ]; then
+    dorestore "${file}"
+  fi
+
+  # Ensure we are backing up
+  dobackup "${file}"
+
+  # Make the file & set permissions if it doesn't exist based on ${slave_config}
+  # using ${inode} & ${hwaddr} as values for {DEV} & {HWADDR}
+  echo "${slave_config}"|sed -e "s|{INODE}|${inode}|g" -e "s|{HWADDR}|${hwaddr}|g" > ${file}
+  chmod ${file_perms} ${file}
+}
+
+
+# Generate master bonded interface or singularity network configuration
+#  1 - iface:hwaddr string generated from get_slave_devices()
+#  2 - ip address
+#  3 - netmask
+#  4 - gatway
+#  5 - Optional 'true' for bonding for 802.1 specification
+function create_master()
+{
+
+  # Create local copy of arguments
+  local dev="${1}"
+  local ip="${2}"
+  local netmask="${3}"
+  local gateway="${4}"
+  local bond="${5}"
+
+  # Create the folder based on $(dirname ${path}) if it isn't there
+  if [ ! -d "$(dirname ${path})" ]; then
+    mkdir -p "$(dirname ${path})"
+    chmod ${dir_perms} $(dirname ${path})
+  fi
+
+  # Make sure we accomodate for a bond0 dev name
+  if [[ "${dev}" =~ - ]]; then
+
+    # Split ${dev} into ${inode} & ${hwaddr} values
+    local inode=$(echo "${dev}"|awk '{split($0, obj, "-");print obj[1]}')
+    local hwaddr=$(echo "${dev}"|awk '{split($0, obj, "-");print obj[2]}')
+  else
+    local inode="${dev}"
+  fi
+
+  # Assign ${path}${inode} as ${file} for brevity
+  local file="${path}${inode}"
+
+  # Use test suite if enabled
+  if [ "${test}" == 1 ] ; then
+    file=$(create_test "${cwd}/test/originals/$(basename ${file})" 1)
+    if [ $? != 0 ] ; then
+      errors+=("${info[@]}")
+      errors+=("ERROR: Error working with test env for ${file}")
+      echo "${errors[@]}" && return 1
+    fi
+  fi
+
+  # If asked, go through the restoration process
+  if [ "${restore}" == 1 ]; then
+    dorestore "${file}"
+  fi
+
+  # Ensure we are backing up
+  dobackup "${file}"
+
+  # Create the base ${config} with common options
+  local config="$(echo "${primary_config}"|sed -e "s|{INODE}|${inode}|g" -e "s|{IPADDR}|${ipaddr}|g" -e "s|{NETMASK}|${netmask}|g" -e "s|{GATEWAY}|${gateway}|g")"
+
+  # Make changes to BONDING_OPTS if single interface
+  if [ "${bond}" == "true" ]; then
+     echo "${config}" > ${file}
+  else
+    echo "${config}"|sed -e "s|^BONDING.*|HWADDR=${hwaddr}|g" > ${file}
+  fi
+
+  chmod ${file_perms} ${file}
+}
+
+
+# Handle network configuration assembly
+function config_network()
+{
+  # Call get_slave_devices() as ${network_devices[@]}
+  info+=("INFO: Attempting to gather priority of physical devices based on bus:slot:id,")
+  local network_devices=($(get_slave_devices))
+
+  # Catch error returns
+  if [ $? -eq 1 ]; then
+    errors+=("${info[@]}")
+    errors+=("ERROR: Error occured getting list of nodes,")
+    echo "${errors[@]}" && return 1
+  fi
+
+  # Handle an ${#network_devices[@]} == 0
+  if [ ${#network_devices[@]} -eq 0 ]; then
+    errors+=("${info[@]}")
+    errors+=("ERROR: Empty list of ethernet devices,")
+    echo "${errors[@]}" && return 1
+  fi
+
+  # Make sure we can create a valid 802.1 bonded configuration
+  if [ ${#network_devices[@]} -gt 1 ]; then
+
+    info+=("INFO: Multiple physical adapters present. Creating 802.1 pair,")
+
+    # Iterate ${network_devices[@]} if > 0
+    for device in "${network_devices[@]}"; do
+
+      info+=("INFO: Creating configuration for ${device},")
+
+      # Create ${device} as slave
+      create_slave "${device}"
+    done|sort -u
+
+    info+=("INFO: Creating configuration for master 'bond0',")
+
+    # Make the master
+    create_master "bond0" "${ip}" "${netmask}" "${gateway}" "true"
+
+    echo "${info[@]}" && return 0
+  fi
+
+  info+=("INFO: Single physical adapter found. Creating configuration for ${network_devices[0]},")
+
+  # Create singular configuration since ${#network_devices[@]} >= 1
+  create_master "${network_devices[0]}" "${ip}" "${netmask}" "${gateway}"
+
+  echo "${info[@]}" && return 0
+}
+
+
+# Global options
+verbose=0
+check=0
+restore=0
+test=0
+interactive=0
+prog=$(basename $0)
+
+# Ensure we have permissions
+if [ $UID != 0 ] ; then
+  echo "${prog}: Requires root privileges"
+  exit 1
+fi
+
+while getopts "ha:vcrtin:s:g:s:" OPTION ; do
+  case $OPTION in
+    h) usage && exit 1 ;;
+    a) author=$OPTARG ;;
+    n) ipaddr=$OPTARG ;;
+    s) netmask=$OPTARG ;;
+    g) gateway=$OPTARG ;;
+    v) verbose=1 ;;
+    c) check=1 ;;
+    r) restore=1 ;;
+    t) test=1 ;;
+    i) interactive=1 ;;
+    ?) usage && exit 1 ;;
+  esac
+done
+
+# Make sure we have an author if we are not restoring or validating
+if [[ "${author}" == "" ]] && [[ "${restore}" == 0 ]] && [[ "${check}" == 0 ]]; then
+  echo "${prog}: Must specify an author name (use -a <initials>)"
+  echo ""
+  usage
+  exit 1
+fi
+
+# Make sure we have network configuration options
+if [[ "${ipaddr}" == "" ]] && [[ "${netmask}" == "" ]] && [[ "${gateway}" == "" ]] && [[ "${restore}" == 0 ]] && [[ "${check}" == 0 ]]; then
+  echo "${prog}: Must provide networking configuration information"
+  echo ""
+  usage
+  exit 1
+fi
+
+# Robot, do work
+main "config_network"

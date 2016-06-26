@@ -1,0 +1,126 @@
+#!/bin/bash
+
+# Binary path
+ksh_path=/bin/ksh
+
+# Symlink path
+ksh_symlink=/usr/bin/ksh
+
+# Get our current working directory
+cwd=$(dirname ${BASH_SOURCE[0]})
+
+# Setup a path for binary tools (just in case)
+PATH=$PATH:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+
+# Make sure our common libraries are available
+if [ ! -f "${cwd}/libs/common" ] ; then
+  echo "${prog}: Could not load libraries"
+  exit 1
+fi
+
+# Load our libs
+source ${cwd}/libs/common
+
+# Displays available arg list
+usage()
+{
+  cat <<EOF
+Usage $0 [options]
+
+Setup a symlink for /bin/ksh
+
+  Help:
+    -h  Show this message
+    -v  Enable verbosity mode
+
+  Required:
+    -a  Author name (required)
+
+  Validation:
+    -c  Perform validation of change
+
+EOF
+}
+
+config_kshrc_symlink()
+{
+  # Error array
+  errors=()
+
+  # Global info array
+  info=()
+
+  # Does the target exist?
+  info+=("INFO: Validating target exists (${ksh_path}),")
+  if [ ! -f ${ksh_path} ]; then
+    errors+=("ERROR: The target does not exist (${ksh_path}),")
+    errors+=("${info[@]}")
+    echo "${errors[@]}" && return 1
+  fi
+
+  # If told, make the change
+  if [ "${check}" == 0 ]; then
+
+    # Are there previous errors, stat is empty or no existing symlink?
+    if [[ ${#errors[@]} -eq 0 ]] || [[ ! -h ${ksh_symlink} ]]; then
+
+      info+=("INFO: Creating symlink (${ksh_symlink}),")
+
+      # Make the link
+      ln -s ${ksh_path} ${ksh_symlink}
+    fi
+  fi
+
+  # Validating ${ksh_symlink}
+  info+=("INFO: Validating symlink (${ksh_symlink}),")
+  if [ ! -h ${ksh_symlink} ]; then
+    errors+=("ERROR: The symlink does not exist (${ksh_symlink}),")
+  fi
+
+  # Return errors
+  if [ "${#errors[@]}" != 0 ] ; then
+    errors+=("${info[@]}")
+    echo "${errors[@]}" && return 1
+  fi
+
+  # Expose information array
+  echo "${info[@]}"
+
+  # Return code
+  return 0
+}
+
+# Global options
+verbose=0
+check=0
+prog=$(basename $0)
+
+# Ensure we have permissions
+if [ $UID != 0 ] ; then
+  echo "${prog}: Requires root privileges"
+  exit 1
+fi
+
+# Set variables (-t does nothing and is present only for automation)
+while getopts "ha:vctri" OPTION ; do
+  case $OPTION in
+    h) usage && exit 1 ;;
+    a) author=$OPTARG ;;
+    v) verbose=1 ;;
+    c) check=1 ;;
+    t) bogus=1 ;;
+    r) bogus=1 ;;
+    i) bogus=1 ;;
+    ?) usage && exit 1 ;;
+  esac
+done
+
+# Make sure we have an author if we are not restoring or validating
+if [[ "${author}" == "" ]] && [[ "${restore}" == 0 ]] && [[ "${check}" == 0 ]]; then
+  echo "${prog}: Must specify an author name (use -a <initials>)"
+  usage
+  exit 1
+fi
+
+# Robot, do work
+main "config_kshrc_symlink"

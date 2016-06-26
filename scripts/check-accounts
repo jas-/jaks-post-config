@@ -1,0 +1,201 @@
+#!/bin/bash
+
+# Get our current working directory
+cwd=$(dirname ${BASH_SOURCE[0]})
+
+# Setup a path for binary tools (just in case)
+PATH=$PATH:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+
+# Make sure our common libraries are available
+if [ ! -f "${cwd}/libs/common" ] ; then
+  echo "${prog}: Could not load libraries"
+  exit 1
+fi
+
+# Load our libs
+source ${cwd}/libs/common
+
+# Displays available arg list
+usage()
+{
+  cat <<EOF
+Usage $0 [options]
+
+Perform account configuration checks
+
+  Help:
+    -h  Show this message
+    -v  Enable verbosity mode
+
+EOF
+}
+
+# Checks for empty passwords
+#  1 - Path to shadow file
+# Returns error or 0
+check_pass()
+{
+  # File to check
+  local shadow="${1}"
+
+  # Perform the check and raise error
+  result=$(awk -F: '($2 == "") {
+    print "${prog}: No password (" $0 ")"
+  }' ${shadow})
+
+  # If an error exists return it and exit
+  if [ "${result}" != "" ] ; then
+    echo "${prog}: ${result}" && return
+  fi
+
+  echo 0
+}
+
+# Checks for account usage of shadow for hashes
+#  1 - Path to passwd file
+# Returns error or 0
+check_shadow()
+{
+  local passwd="${1}"
+
+  # Perform the check and raise error
+  result=$(awk -F: '($2 != "x") {
+    print "${prog}: Not using shadow file (" $0 ")"
+  }' ${passwd})
+
+  # If an error exists return it and exit
+  if [ "${result}" != "" ] ; then
+    echo "${prog}: ${result}" && return
+  fi
+
+  echo 0
+}
+
+# Checks for account usage of UID value
+#  1 - Path to passwd file
+# Returns error or 0
+check_uid()
+{
+  local passwd="${1}"
+
+  # Perform the check and raise error
+  result=$(awk -F: '($3 == 0) {
+    if (!match($0, /^root/)) {
+      print "${prog}: Account using UID 0 (" $0 ")"
+    }
+  }' ${passwd})
+
+  # If an error exists return it and exit
+  if [ "${result}" != "" ] ; then
+    echo "${prog}: ${result}" && return
+  fi
+
+  echo 0
+}
+
+# Checks for account shell setting
+#  1 - Path to passwd file
+# Returns error or 0
+check_shell()
+{
+  local passwd="${1}"
+
+  # Perform the check and raise error
+  result=$(awk -F: '($7 == 0) {
+    if (!match($0, /^ksh/)) {
+      print "${prog}: Account not using ksh (" $0 ")"
+    }
+  }' ${passwd})
+
+  # If an error exists return it and exit
+  if [ "${result}" != "" ] ; then
+    echo "${prog}: ${result}" && return
+  fi
+
+  echo 0
+}
+
+# Performs account validations
+# Returns array or 0
+check_accounts()
+{
+  # No need to backup or restore as these are not modified
+  local passwd=/etc/passwd
+  local shadow=/etc/passwd
+
+  # Error array
+  errors=()
+
+  # Global info array
+  info=()
+
+  info+=("INFO: Checking for accounts without password,")
+
+  # Test account passwords
+  chk1=$(check_pass "${shadow}")
+  if [ "${chk1}" != 0 ] ; then
+    errors+=("${chk1},")
+  fi
+
+  info+=("INFO: Checking for accounts not using shadow file,")
+
+  # Test account use of shadow file
+  chk2=$(check_shadow "${passwd}")
+  if [ "${chk2}" != 0 ] ; then
+    errors+=("${chk2},")
+  fi
+
+  info+=("INFO: Checking for accounts with UID 0,")
+
+  # Test account UID membership
+  chk3=$(check_uid "${passwd}")
+  if [ "${chk3}" != 0 ] ; then
+    errors+=("${chk3},")
+  fi
+
+  info+=("INFO: Checking for account shell (/bin/ksh),")
+
+  # Test account shell
+  chk4=$(check_shell "${passwd}")
+  if [ "${chk4}" != 0 ] ; then
+    errors+=("${chk4},")
+  fi
+
+  # Return errors
+  if [ "${#errors[@]}" != 0 ] ; then
+    errors+=("${info[@]}")
+    echo "${errors[@]}" && return 1
+  fi
+
+  # Expose information array
+  echo "${info[@]}"
+
+  # Return code
+  return 0
+}
+
+# Ensure we have permissions
+if [ $UID != 0 ] ; then
+  echo "${prog}: Requires root privileges"
+  exit 1
+fi
+
+# global vars
+verbose=0
+prog=$(basename $0)
+
+# Set variables (-c, -a, -r, -i & -t is for bulk tool runs and does nothing)
+while getopts "hvcta:ri" OPTION ; do
+  case $OPTION in
+    h) usage && exit 1 ;;
+    v) verbose=1 ;;
+    c) bogus=1 ;;
+    t) bogus=1 ;;
+    r) bogus=1 ;;
+    i) bogus=1 ;;
+    a) bogus=1 ;;
+   ?) usage && exit 1 ;;
+  esac
+done
+
+main "check_accounts"

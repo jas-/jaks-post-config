@@ -1,0 +1,240 @@
+#!/bin/bash
+
+# File to use
+file=/etc/sudoers
+
+# Associative array for sudo defaults
+declare -A defaults
+defaults[syslog]="auth"
+defaults[log_year]=""
+defaults[logfile]=/var/log/sudo.log
+defaults[!root_sudo]=""
+
+# Associative array for Host_Alias's
+declare -A host_alias
+
+# Associative array for User_Alias's
+declare -A user_alias
+
+# Associative array for Cmnd_Alias's
+declare -A cmnd_alias
+
+# Associative array for permissions
+declare -A permissions
+
+# Get our current working directory
+cwd=$(dirname ${BASH_SOURCE[0]})
+
+# Setup a path for binary tools (just in case)
+PATH=$PATH:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+
+# Make sure our common libraries are available
+if [ ! -f "${cwd}/libs/common" ] ; then
+  echo "${prog}: Could not load libraries"
+  exit 1
+fi
+
+# Load our libs
+source ${cwd}/libs/common
+
+# Displays available arg list
+usage()
+{
+  cat <<EOF
+Usage $0 [options]
+
+Configures sudoers default options
+
+  Help:
+    -h  Show this message
+    -v  Enable verbosity mode
+
+  Required:
+    -a  Author name (required)
+
+  Options:
+    -f  File to use
+    -d  Defaults
+    -h  Host Alias
+    -u  User Alias
+    -n  Command alias
+    -p  Permissions
+
+  Validation:
+    -c  Perform validation of change
+
+  Restoration options:
+    -r  Perform rollback of changes
+    -i  Interactive mode, to be used with -r
+
+  Development mode:
+    -t  Run in test mode (assumes test env)
+
+EOF
+}
+
+config_sudo_defaults()
+{
+  # Error array
+  errors=()
+
+  # Global info array
+  info=()
+
+  # Use test suite if enabled
+  if [ "${test}" == 1 ] ; then
+    file=$(create_test "${cwd}/test/originals/$(basename ${file})")
+   if [ $? != 0 ] ; then
+      errors+=("ERROR: Error working with test env")
+      echo "${errors[@]}" && return 1
+    fi
+  fi
+
+  # Test for presence of file
+  if [ ! -f ${file} ]; then
+    errors+=("ERROR: File specified was not found,")
+    echo "${errors[@]}" && return 1
+  fi
+
+  # Perform restoration if specified
+  if [ "${restore}" == 1 ] ; then
+
+    info+=("$(restore "${file}")")
+
+    # Check results & return if an error occured
+    if [ $? != 0 ]; then
+      echo "${info[@]}" && return 1
+    fi
+
+    # Everything passed, return 0
+    echo "${info[@]}" && return 0
+  fi
+
+  # Backup file if we are making changes
+  if [[ "${check}" == 0 ]] && [[ "${restore}" == 0 ]] ; then
+
+    info+=("$(backup "${file}" "${author}")")
+
+    # Check results & return if an error occured
+    if [ $? != 0 ]; then
+      echo "${info[@]}" && return 1
+    fi
+  fi
+
+  # Add/replace ${defaults[@]} to ${file}
+  if [ ${#defaults[@]} -gt 0 ]; then
+    def_res=$(assoc_multi_line_replace "${file}" "Defaults" "$(declare -p defaults)")
+
+    # If response not 0, assign results to the errors() array
+    if [ $? -gt 0 ]; then
+      errors+=("${def_res}")
+    else
+      info+=("${def_res}")
+    fi
+  fi
+
+  # Add/replace ${host_alias[@]} to ${file}
+  if [ ${#host_alias[@]} -gt 0 ]; then
+    host_res=$(assoc_multi_line_replace "${file}" "Host_Alias" "$(declare -p host_alias)")
+
+    # If response not 0, assign results to the errors() array
+    if [ $? -gt 0 ]; then
+      errors+=("${host_res}")
+    else
+      info+=("${host_res}")
+    fi
+  fi
+
+  # Add/replace ${user_alias[@]} to ${file}
+  if [ ${#user_alias[@]} -gt 0 ]; then
+    user_res=$(assoc_multi_line_replace "${file}" "User_Alias" "$(declare -p user_alias)")
+
+    # If response not 0, assign results to the errors() array
+    if [ $? -gt 0 ]; then
+      errors+=("${user_res}")
+    else
+      info+=("${user_res}")
+    fi
+  fi
+
+  # Add/replace ${cmnd_alias[@]} to ${file}
+  if [ ${#cmnd_alias[@]} -gt 0 ]; then
+    cmnd_res=$(assoc_multi_line_replace "${file}" "Cmnd_Alias" "$(declare -p cmnd_alias)" 1)
+
+    # If response not 0, assign results to the errors() array
+    if [ $? -gt 0 ]; then
+      errors+=("${cmnd_res}")
+    else
+      info+=("${cmnd_res}")
+    fi
+  fi
+
+  # Add/replace ${permissions[@]} to ${file}
+  if [ ${#permissions[@]} -gt 0 ]; then
+    perm_res=$(assoc_multi_line_replace "${file}" "" "$(declare -p permissions)")
+
+    # If response not 0, assign results to the errors() array
+    if [ $? -gt 0 ]; then
+      errors+=("${perm_res}")
+    else
+      info+=("${perm_res}")
+    fi
+  fi
+
+  # Return errors
+  if [ "${#errors[@]}" != 0 ] ; then
+    errors+=("${info[@]}")
+    echo "${errors[@]}" && return 1
+  fi
+
+  # Expose information array
+  echo "${info[@]}"
+
+  # Return code
+  return 0
+}
+
+# Global options
+verbose=0
+check=0
+restore=0
+test=0
+interactive=0
+prog=$(basename $0)
+
+# Ensure we have permissions
+if [ $UID != 0 ] ; then
+  echo "${prog}: Requires root privileges"
+  exit 1
+fi
+
+# Set variables
+while getopts "ha:vcrtif:d:u:n:p:eo:" OPTION ; do
+  case $OPTION in
+    h) usage && exit 1 ;;
+    e) examples && exit 1 ;;
+    a) author=$OPTARG ;;
+    f) file=$OPTARG ;;
+    d) eval "declare -A defaults="${OPTARG#*=} ;;
+    u) eval "declare -A user_alias="${OPTARG#*=} ;;
+    o) eval "declare -A host_alias="${OPTARG#*=} ;;
+    n) eval "declare -A cmnd_alias="${OPTARG#*=} ;;
+    p) eval "declare -A permissions="${OPTARG#*=} ;;
+    v) verbose=1 ;;
+    c) check=1 ;;
+    r) restore=1 ;;
+    t) test=1 ;;
+    i) interactive=1 ;;
+    ?) usage && exit 1 ;;
+  esac
+done
+
+# Make sure we have an author if we are not restoring or validating
+if [[ "${author}" == "" ]] && [[ "${restore}" == 0 ]] && [[ "${check}" == 0 ]]; then
+  echo "${prog}: Must specify an author name (use -a <initials>)"
+  usage
+  exit 1
+fi
+
+# Robot, do work
+main "config_sudo_defaults"

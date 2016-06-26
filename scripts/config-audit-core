@@ -1,0 +1,231 @@
+#!/bin/bash
+
+# Associative array of files making up the passwd database (see man core)
+declare -A files
+files[pattern]=/proc/sys/kernel/core_pattern
+files[limits]=/etc/security/limits.conf
+
+# Array of key / value options for non kernel core
+declare -A core
+core[path]=/var/core/
+core[perms]=1777
+core[pattern]='%e.%p.core'
+
+# Array of key / value options for limits (see man limits.conf)
+declare -A limits
+limits[domain]='*'
+limits[type]='hard'
+limits[item]='core'
+limits[value]='unlimited'
+
+# Get our current working directory
+cwd=$(dirname ${BASH_SOURCE[0]})
+
+# Setup a path for binary tools (just in case)
+PATH=$PATH:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+
+# Make sure our common libraries are available
+if [ ! -f "${cwd}/libs/common" ] ; then
+  echo "${prog}: Could not load libraries"
+  exit 1
+fi
+
+# Load our libs
+source ${cwd}/libs/common
+
+# Displays available arg list
+usage()
+{
+  cat <<EOF
+Usage $0 [options]
+
+Configure core dump management
+
+  Help:
+    -h  Show this message
+    -v  Enable verbosity mode
+
+  Required:
+    -a  Author name (required)
+
+  Options:
+    -p  File that handles core dump patterns
+    -l  File that handles core dump limits
+
+  Validation:
+    -c  Perform validation of change
+
+  Restoration options:
+    -r  Perform rollback of changes
+    -i  Interactive mode, to be used with -r
+
+  Development mode:
+    -t  Run in test mode (assumes test env)
+
+EOF
+}
+
+config_audit_core()
+{
+  # Error array
+  errors=()
+
+  # Global info array
+  info=()
+
+  # Iterate our array of files
+  for file in ${!files[@]}; do
+
+    # Start counting so we have an index
+    i=$((i+1))
+
+    # Use test suite if enabled
+    if [ "${test}" == 1 ] ; then
+      files[${file}]=$(create_test "${cwd}/test/originals/$(basename ${files[${file}]})")
+      if [ $? != 0 ] ; then
+        errors+=("ERROR: Error working with test env for ${file} (${files[${file}]}")
+        echo "${errors[@]}" && return 1
+      fi
+    fi
+
+    # Ensure the file/path is a valid file
+    if [ ! -f ${files[${file}]} ]; then
+      errors+=("ERROR: File ${file} not found (${files[${file}]}),")
+      echo "${errors[@]}" && return 1
+    fi
+
+    # Perform restoration if specified
+    if [ "${restore}" == 1 ] ; then
+
+      info+=("$(restore "${files[${file}]}")")
+
+      # Check results & return if an error occured
+      if [ $? != 0 ]; then
+        echo "${info[@]}" && return 1
+      fi
+
+      # If its the last file in the ${files[@]} array exit success
+      if [ ${i} -eq ${#files[@]} ]; then
+        echo "${info[@]}" && return 0
+      fi
+    fi
+
+    # Backup file if we are making changes
+    if [[ "${check}" == 0 ]] && [[ "${restore}" == 0 ]] ; then
+
+      info+=("$(backup "${files[${file}]}" "${author}")")
+
+      # Check results & return if an error occured
+      if [ $? != 0 ]; then
+        echo "${info[@]}" && return 1
+      fi
+    fi
+  done
+
+  # Define a pattern based on the ${limits[@]} array
+  tpat=$(echo "${limits[domain]}"|awk '$0 ~ /*/{print "\\*"}')
+  needle="^${tpat}.*${limits[type]}.*${limits[item]}.*${limits[value]}"
+
+  # Do work
+  if [ "${check}" == 0 ]; then
+
+    # Create directory if it doesn't already exist based on ${core[path]}
+    if [ ! -d ${core[path]} ]; then
+      info+=("INFO: Creating ${core[path]},")
+      mkdir -p -m ${core[perms]} ${core[path]}
+    fi
+
+    # Since it exists (or existed) make sure the permissions are good ${core[perms]}
+    perms=$(stat -c %a ${core[path]})
+    if [ "${perms}" != "${core[perms]}" ]; then
+      info+=("INFO: Setting permissions ${core[path]} (${core[perms]}),")
+      chmod -R ${core[perms]} ${core[path]}
+    fi
+
+    # Create pattern for core dumps (we want to replace whatever is there)
+    info+=("INFO: Setting core dump pattern (${core[pattern]}),")
+    echo "${core[path]}${core[pattern]}" > ${files[pattern]}
+
+    # Create/edit entry in ${files[limits]} based on ${limits[@]}
+    info+=("INFO: Creating new entry in ${files[limits]},")
+    str_replace "${files[limits]}" "${needle}" "${limits[domain]}  ${limits[type]}  ${limits[item]}  ${limits[value]}"
+  fi
+
+  # Perform validations
+  info+=("INFO: Validating ${core[path]} exists,")
+  if [ ! -d ${core[path]} ]; then
+    errors+=("ERROR: ${core[path]} does not exist,")
+  fi
+
+  # Validate permissions (if it exists)
+  if [ -d ${core[path]} ]; then
+    info+=("INFO: Validating permissions (${core[perms]}),")
+    perms=$(stat -c %a ${core[path]})
+    if [ "${perms}" != "${core[perms]}" ]; then
+      errors+=("ERROR: Permissions are wrong (${perms}) on ${core[path]},")
+    fi
+  fi
+
+  # Validate ${core[pattern]} in ${files[pattern]}
+  info+=("INFO: Validating core dump pattern (${core[pattern]}),")
+  val=$(grep "^${core[path]}${core[pattern]}" ${files[pattern]})
+  if [ "${val}" == "" ]; then
+    errors+=("ERROR: Core dump file pattern is inaccurate (${core[pattern]}),")
+  fi
+
+  # Validate ${needle} in ${files[limits]}
+  info+=("INFO: Validating limits entry,")
+  val=$(grep "${needle}" ${files[limits]})
+  if [ "${val}" == "" ]; then
+    errors+=("ERROR: Limits entry is inaccurate,")
+  fi
+
+  # Return errors
+  if [ "${#errors[@]}" != 0 ] ; then
+    errors+=("${info[@]}")
+    echo "${errors[@]}" && return 1
+  fi
+
+  # Expose information array
+  echo "${info[@]}"
+
+  # Return code
+  return 0
+}
+
+# Global options
+verbose=0
+check=0
+restore=0
+test=0
+interactive=0
+prog=$(basename $0)
+
+# Ensure we have permissions
+if [ $UID != 0 ] ; then
+  echo "${prog}: Requires root privileges"
+  exit 1
+fi
+
+while getopts "ha:vcrtip:l:" OPTION ; do
+  case $OPTION in
+    h) usage && exit 1 ;;
+    a) author=$OPTARG ;;
+    v) verbose=1 ;;
+    c) check=1 ;;
+    r) restore=1 ;;
+    t) test=1 ;;
+    i) interactive=1 ;;
+    ?) usage && exit 1 ;;
+  esac
+done
+
+# Make sure we have an author if we are not restoring or validating
+if [[ "${author}" == "" ]] && [[ "${restore}" == 0 ]] && [[ "${check}" == 0 ]]; then
+  echo "${prog}: Must specify an author name (use -a <initials>)"
+  usage
+  exit 1
+fi
+
+# Robot, do work
+main "config_audit_core"

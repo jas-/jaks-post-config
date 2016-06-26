@@ -1,0 +1,198 @@
+#!/bin/bash
+
+# Associative array of files making up the passwd/shadow databases
+declare -A files
+files[passwd]=/etc/passwd
+files[shadow]=/etc/shadow
+
+# Array of key / value options for login defaults
+# For a complete list please consult man(5) login.defs
+declare -A acct
+acct[mindays]=0
+acct[maxdays]=60
+acct[warndays]=8
+
+# Get our current working directory
+cwd=$(dirname ${BASH_SOURCE[0]})
+
+# Setup a path for binary tools (just in case)
+PATH=$PATH:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+
+# Make sure our common libraries are available
+if [ ! -f "${cwd}/libs/common" ] ; then
+  echo "${prog}: Could not load libraries"
+  exit 1
+fi
+
+# Load our libs
+source ${cwd}/libs/common
+
+# Displays available arg list
+usage()
+{
+  cat <<EOF
+Usage $0 [options]
+
+Manage password aging restrictions
+
+  Help:
+    -h  Show this message
+    -v  Enable verbosity mode
+
+  Required:
+    -a  Author name (required)
+
+  Options:
+    -p  Password file to use
+    -s  Shadow file to use
+
+  Validation:
+    -c  Perform validation of change
+
+  Restoration options:
+    -r  Perform rollback of changes
+    -i  Interactive mode, to be used with -r
+
+  Development mode:
+    -t  Run in test mode (assumes test env)
+
+EOF
+}
+
+config_pw_age()
+{
+  # Error array
+  errors=()
+
+  # Global info array
+  info=()
+
+  # Iterate our array of files
+  for file in ${!files[@]}; do
+
+    # Start counting so we have an index
+    i=$((i+1))
+
+    # Use test suite if enabled
+    if [ "${test}" == 1 ] ; then
+      files[${file}]=$(create_test "${cwd}/test/originals/$(basename ${files[${file}]})")
+      if [ $? != 0 ] ; then
+        errors+=("ERROR: Error working with test env for ${file} (${files[${file}]}")
+        echo "${errors[@]}" && return 1
+      fi
+    fi
+
+    # Ensure the file/path is a valid file
+    if [ ! -f ${files[${file}]} ]; then
+      errors+=("ERROR: File ${file} not found (${files[${file}]}),")
+      echo "${errors[@]}" && return 1
+    fi
+
+    # Perform restoration if specified
+    if [ "${restore}" == 1 ] ; then
+
+      info+=("$(restore "${files[${file}]}")")
+
+      # Check results & return if an error occured
+      if [ $? != 0 ]; then
+        echo "${info[@]}" && return 1
+      fi
+
+      # If its the last file in the ${files[@]} array exit success
+      if [ ${i} -eq ${#files[@]} ]; then
+        echo "${info[@]}" && return 0
+      fi
+    fi
+
+    # Backup file if we are making changes
+    if [[ "${check}" == 0 ]] && [[ "${restore}" == 0 ]] ; then
+
+      info+=("$(backup "${files[${file}]}" "${author}")")
+
+      # Check results & return if an error occured
+      if [ $? != 0 ]; then
+        echo "${info[@]}" && return 1
+      fi
+    fi
+  done
+
+  # Get accounts & filter out system accounts as an array
+  IFS=' ' read -a accts <<< $(awk -F: '($3 > 500){print $1}' ${files[passwd]}|tr '\n' ' ')
+
+  # Iterate accounts & do work
+  for user in "${accts[@]}"; do
+
+    # For each account iterate the options specified in ${acct[@]} & apply/validate setting(s)
+    for param in ${!acct[@]}; do
+
+      info+=("INFO: Working on ${param} for ${user},")
+
+      # Make the change
+      if [ "${check}" == 0 ]; then
+        chge=$(chage --${param} ${acct[${param}]} ${user})
+        if [ $? == 1 ]; then
+          errors+=("ERROR: An error occured setting ${param},")
+        fi
+      fi
+
+      # Perform validation on each account according to options specified in ${acct[@]}
+      val=$(chage -l ${user}|grep -i ${param:0:3}|tail -1|awk '{split($0, obj, ":");print obj[2]}'|xargs)
+      if [ "${val}" != "${acct[${param}]}" ]; then
+        errors+=("ERROR: Incorrect value for ${user}: ${param} (${acct[${param}]} != ${val}),")
+      fi
+      info+=("INFO: Current value for ${param} = ${val},")
+
+    done
+  done
+
+  # Return errors
+  if [ "${#errors[@]}" != 0 ] ; then
+    errors+=("${info[@]}")
+    echo "${errors[@]}" && return 1
+  fi
+
+  # Expose information array
+  echo "${info[@]}"
+
+  # Return code
+  return 0
+}
+
+# Global options
+verbose=0
+check=0
+restore=0
+test=0
+interactive=0
+prog=$(basename $0)
+
+# Ensure we have permissions
+if [ $UID != 0 ] ; then
+  echo "${prog}: Requires root privileges"
+  exit 1
+fi
+
+while getopts "ha:vcrtip:s:" OPTION ; do
+  case $OPTION in
+    h) usage && exit 1 ;;
+    a) author=$OPTARG ;;
+    p) files[passwd]=$OPTARG ;;
+    s) files[shadow]=$OPTARG ;;
+    v) verbose=1 ;;
+    c) check=1 ;;
+    r) restore=1 ;;
+    t) test=1 ;;
+    i) interactive=1 ;;
+    ?) usage && exit 1 ;;
+  esac
+done
+
+# Make sure we have an author if we are not restoring or validating
+if [[ "${author}" == "" ]] && [[ "${restore}" == 0 ]] && [[ "${check}" == 0 ]]; then
+  echo "${prog}: Must specify an author name (use -a <initials>)"
+  usage
+  exit 1
+fi
+
+# Robot, do work
+main "config_pw_age"

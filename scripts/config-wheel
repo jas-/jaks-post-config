@@ -1,0 +1,241 @@
+#!/bin/bash
+
+# File to use
+file=/etc/group
+
+# Group to assign members to
+group="wheel"
+
+# Array for wheel members
+members=(p76170 p33131 p36623 p22391 p30244 p30925 p21045 p26747)
+
+# Get our current working directory
+cwd=$(dirname ${BASH_SOURCE[0]})
+
+# Setup a path for binary tools (just in case)
+PATH=$PATH:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+
+# Make sure our common libraries are available
+if [ ! -f "${cwd}/libs/common" ] ; then
+  echo "${prog}: Could not load libraries"
+  exit 1
+fi
+
+# Load our libs
+source ${cwd}/libs/common
+
+# Displays available arg list
+usage()
+{
+  cat <<EOF
+Usage $0 [options]
+
+Add users to wheel group
+
+  Help:
+    -h  Show this message
+    -v  Enable verbosity mode
+
+  Required:
+    -a  Author name (required)
+
+  Options:
+    -f  File to use
+
+  Validation:
+    -c  Perform validation of change
+
+  Restoration options:
+    -r  Perform rollback of changes
+    -i  Interactive mode, to be used with -r
+
+  Development mode:
+    -t  Run in test mode (assumes test env)
+
+EOF
+}
+
+config_wheel()
+{
+  # Error array
+  errors=()
+
+  # Global info array
+  info=()
+
+  # Use test suite if enabled
+  if [ "${test}" == 1 ] ; then
+    file=$(create_test "${cwd}/test/originals/$(basename ${file})")
+    if [ $? != 0 ] ; then
+      errors+=("ERROR: Error working with test env")
+      echo "${errors[@]}" && return 1
+    fi
+  fi
+
+  # Test for presence of file
+  if [ ! -f ${file} ]; then
+    errors+=("ERROR: Error file not found (${file}),")
+    echo "${errors[@]}" && return 1
+  fi
+
+  # Perform restoration if specified
+  if [ "${restore}" == 1 ] ; then
+
+    info+=("$(restore "${file}")")
+
+    # Check results & return if an error occured
+    if [ $? != 0 ]; then
+      echo "${info[@]}" && return 1
+    fi
+
+    # Everything passed, return 0
+    echo "${info[@]}" && return 0
+  fi
+
+  # Backup file if we are making changes
+  if [[ "${check}" == 0 ]] && [[ "${restore}" == 0 ]] ; then
+
+    info+=("$(backup "${file}" "${author}")")
+
+    # Check results & return if an error occured
+    if [ $? != 0 ]; then
+      echo "${info[@]}" && return 1
+    fi
+  fi
+
+  # Make the change if ${check} == 0
+  if [ "${check}" == 0 ]; then
+
+    # Define a prefix
+    prefix="$(grep "^${group}" ${file}|awk '{split($0, o, ":"); print o[1]":"o[2]":"o[3]":"}')"
+
+    # Save bash file seperator and change to ,
+    oIFS="$IFS"
+    IFS=","
+
+    # Obtain current members of ${group} from ${file} as ${haystack[@]}
+    haystack=($(grep "^${group}" ${file}|cut -d: -f4))
+
+    # Change file seperator back
+    IFS="${oIFS}"
+
+    # Make sure comm has two valid objects to work with
+    if [[ ${#haystack[@]} -gt 0 ]] && [[ ${#members[@]} -gt 0 ]]; then
+
+      # Perform intersection of ${members[@]} with ${haystack[@]}
+      results=($(comm -13 <(printf '%s\n' "${haystack[@]}"|sort -u) <(printf '%s\n' "${members[@]}"|sort -u)))
+      
+    else
+
+      # If ${#haystack[@]} > 0 but ${#members[@]} <= 0 do this...
+      if [[ ${#haystack[@]} -gt 0 ]] && [[ ${#members[@]} -le 0 ]]; then
+        results="$(echo "${haystack[@]}"|sort -u)"
+      fi
+
+      # If ${#haystack[@]} <= 0 but ${#members[@]} > 0 do this...
+      if [[ ${#haystack[@]} -le 0 ]] && [[ ${#members[@]} -gt 0 ]]; then
+        results="$(echo "${members[@]}"|sort -u)"
+      fi
+    fi
+
+    # If ${check} -eq 0 write ${results} to ${group} in ${file}
+    if [ ${#results[@]} -gt 0 ]; then
+
+      # Add ${results[@]} to ${haystack[@]}
+      for usr in ${results[@]}; do
+        haystack+=("${usr}")
+      done
+
+      info+=("INFO: Adding missing members to ${file} for ${group} group,")
+      str_replace "${file}" "^${prefix}*" "${prefix}$(echo "${haystack[@]}"|tr ' ' ',')"
+    else
+      info+=("INFO: Members of ${group} in ${file} already exist,")
+    fi
+  fi
+
+  # Save bash file seperator and change to ,
+  oIFS="$IFS"
+  IFS=","
+
+  # Obtain current members of ${group} from ${file} as ${haystack[@]}
+  haystack=($(grep "^${group}" ${file}|cut -d: -f4))
+
+  # Change file seperator back
+  IFS="${oIFS}"
+
+  # Make sure comm has two valid objects to work with
+  if [[ ${#haystack[@]} -gt 0 ]] && [[ ${#members[@]} -gt 0 ]]; then
+
+    # Perform intersection of ${members[@]} with ${haystack[@]}
+    results=($(comm -13 <(printf '%s\n' "${haystack[@]}"|sort -u) <(printf '%s\n' "${members[@]}"|sort -u)))
+      
+  else
+
+    # If ${#haystack[@]} > 0 but ${#members[@]} <= 0 do this...
+    if [[ ${#haystack[@]} -gt 0 ]] && [[ ${#members[@]} -le 0 ]]; then
+      results="$(echo "${haystack[@]}"|sort -u)"
+    fi
+
+    # If ${#haystack[@]} <= 0 but ${#members[@]} > 0 do this...
+    if [[ ${#haystack[@]} -le 0 ]] && [[ ${#members[@]} -gt 0 ]]; then
+      results="$(echo "${members[@]}"|sort -u)"
+    fi
+  fi
+
+  # Validate ${members[@]} for ${group} in ${file}
+  info+=("INFO: Validating members exist in ${file} for ${group} group,")
+  if [ "${results}" != "" ]; then
+    errors+=("ERROR: Accounts missing from ${file} (${results[@]}),")
+  fi
+
+  # Return errors
+  if [ "${#errors[@]}" != 0 ] ; then
+    errors+=("${info[@]}")
+    echo "${errors[@]}" && return 1
+  fi
+
+  # Expose information array
+  echo "${info[@]}"
+
+  # Return code
+  return 0
+}
+
+# Global options
+verbose=0
+check=0
+restore=0
+test=0
+interactive=0
+prog=$(basename $0)
+
+# Ensure we have permissions
+if [ $UID != 0 ] ; then
+  echo "${prog}: Requires root privileges"
+  exit 1
+fi
+
+# Set variables
+while getopts "ha:vcrtif:" OPTION ; do
+  case $OPTION in
+    h) usage && exit 1 ;;
+    a) author=$OPTARG ;;
+    f) file=$OPTARG ;;
+    v) verbose=1 ;;
+    c) check=1 ;;
+    r) restore=1 ;;
+    t) test=1 ;;
+    i) interactive=1 ;;
+    ?) usage && exit 1 ;;
+  esac
+done
+
+# Make sure we have an author if we are not restoring or validating
+if [[ "${author}" == "" ]] && [[ "${restore}" == 0 ]] && [[ "${check}" == 0 ]]; then
+  echo "${prog}: Must specify an author name (use -a <initials>)"
+  usage
+  exit 1
+fi
+
+# Robot, do work
+main "config_wheel"

@@ -1,0 +1,263 @@
+#!/bin/bash
+
+# Path to .profile
+file=/root/.profile
+
+# .kshrc profile settings
+# See https://www-01.ibm.com/support/knowledgecenter/ssw_aix_61/com.ibm.aix.files/kshrc.htm
+declare -A profile
+profile[ENV]="/root/.kshrc"
+profile[EDITOR]="/bin/vi"
+profile[PATH]="\$PATH:/usr/local/bin:/etc/vx/bin:/opt/VRTS/bin:/opt/VRTSvcs/bin:/usr/symcli/bin:/ctmagent/ctm/scripts:/opt/EMLXemlxu/bin:/usr/local/sbin:/opt/VRTSvxfs/sbin:/opt/VRTSob/bin:/opt/quest/bin"
+profile[MANPATH]="\$MANPATH:/usr/local/man:/opt/VRTS/man:/opt/EMLXemlxu/man:/opt/freeware/man:/usr/share/man"
+profile[TERM]="vt100"
+profile[PAGER]="less"
+profile[export]="PATH MANPATH TERM PAGER EDITOR ENV"
+
+# Add aliases
+
+# Get our current working directory
+cwd=$(dirname ${BASH_SOURCE[0]})
+
+# Setup a path for binary tools (just in case)
+PATH=$PATH:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+
+# Make sure our common libraries are available
+if [ ! -f "${cwd}/libs/common" ] ; then
+  echo "${prog}: Could not load libraries"
+  exit 1
+fi
+
+# Load our libs
+source ${cwd}/libs/common
+
+# Displays available arg list
+usage()
+{
+  cat <<EOF
+Usage $0 [options]
+
+Manage user profile
+
+  Help:
+    -h  Show this message
+    -v  Enable verbosity mode
+
+  Required:
+    -a  Author name (required)
+
+  Options:
+    -f  Array of files to use
+
+  Validation:
+    -c  Perform validation of change
+
+  Restoration options:
+    -r  Perform rollback of changes
+    -i  Interactive mode, to be used with -r
+
+  Development mode:
+    -t  Run in test mode (assumes test env)
+
+EOF
+}
+
+# Configure the user .profile
+config_profile()
+{
+  # Error array
+  declare -a errors
+
+  # Global info array
+  declare -a info
+
+  # Use test suite if enabled
+  if [ "${test}" == 1 ] ; then
+    file=$(create_test "${cwd}/test/originals/$(basename ${file})")
+    if [ $? != 0 ] ; then
+      errors+=("ERROR: Error working with test env")
+      echo "${errors[@]}" && return 1
+    fi
+  fi
+
+  # Make ${file} if it doesn't exist
+  if [ ! -f ${file} ]; then
+    touch ${file}
+    chmod 0644 ${file}
+  fi
+
+  # Test for presence of file
+  if [ ! -f ${file} ]; then
+    errors+=("ERROR: File specified was not found,")
+    echo "${errors[@]}" && return 1
+  fi
+
+  # Perform restoration if specified
+  if [ "${restore}" == 1 ] ; then
+
+    info+=("$(restore "${file}")")
+
+    # Check results & return if an error occured
+    if [ $? != 0 ]; then
+      echo "${info[@]}" && return 1
+    fi
+
+    # Everything passed, return 0
+    echo "${info[@]}" && return 0
+  fi
+
+  # Backup file if we are making changes
+  if [[ "${check}" == 0 ]] && [[ "${restore}" == 0 ]] ; then
+
+    info+=("$(backup "${file}" "${author}")")
+
+    # Check results & return if an error occured
+    if [ $? != 0 ]; then
+      echo "${info[@]}" && return 1
+    fi
+  fi
+
+  # Logic for various options available for .profile
+  # See https://www-01.ibm.com/support/knowledgecenter/ssw_aix_61/com.ibm.aix.files/kshrc.htm
+  for item in "${!profile[@]}"; do
+
+    # Handle the PS1 configuration options
+    if [ "${item}" == "PS1" ]; then
+      pattern="export PS1=.*"
+
+      if [ "${check}" == 0 ] ; then
+        info+=("INFO: Setting PS1,")
+        str_replace "${file}" "${pattern}" "export PS1='${kshrc[${item}]}'"
+      fi
+
+      info+=("INFO: Validating PS1 (${pattern}),")
+
+      if [ "$(grep "${pattern}" ${file})" == "" ]; then
+        errors+=("ERROR: Could not validate configuration for PS1 (${pattern}),")
+      fi
+
+    # Handle any 'set' options
+    elif [[ "${profile[${item}]}" =~ ^set ]]; then
+      pattern=$(echo ${profile[${item}]}|awk '{print $1 " " $2}')
+      [ "${pattern}" == "" ] && pattern="^${profile[${item}]}"
+
+      if [ "${check}" == 0 ] ; then
+        info+=("INFO: Setting default option (${profile[${item}]}),")
+        str_replace "${file}" "${pattern}.*" "${profile[${item}]}"
+      fi
+
+      info+=("INFO: Validating any 'set' options,")
+      if [ "$(grep ${pattern} ${file})" == "" ]; then
+        errors+=("ERROR: Could not validate configuration for ${profile[${item}]},")
+      fi
+
+    # Handle any 'alias' options
+    elif [[ "${profile[${item}]}" =~ ^alias ]]; then
+      pattern=$(echo ${profile[${item}]}|awk '{split($2, obj, "=");print $1 " " obj[1]}')
+      [ "${pattern}" == "" ] && pattern="^${profile[${item}]}"
+
+      if [ "${check}" == 0 ] ; then
+        info+=("INFO: Setting alias (${profile[${item}]}),")
+        str_replace "${file}" "^${pattern}.*" "${profile[${item}]}"
+      fi
+
+      info+=("INFO: Validating any 'alias' definitions,")
+      if [ "$(grep ${pattern} ${file})" == "" ]; then
+        errors+=("ERROR: Could not validate configuration for ${profile[${item}]},")
+      fi
+
+    # Handle any 'function' options (must be on one line, multi line not supported)
+    elif [[ "${profile[${item}]}" =~ ^function ]]; then
+      pattern=$(echo ${item}|awk '{print $1 " " $2}')
+      [ "${pattern}" == "" ] && pattern="^${profile[${item}]}"
+
+      if [ "${check}" == 0 ] ; then
+        info+=("INFO: Adding function (${profile[${item}]}),")
+        str_replace "${file}" "^${pattern}.*" "${profile[${item}]}"
+      fi
+
+      info+=("INFO: Validating any 'function' definitions,")
+      if [ "$(grep ${pattern} ${file})" == "" ]; then
+        errors+=("ERROR: Could not validate configuration for ${profile[${item}]},")
+      fi
+
+    # Set key = value for the reset
+    else
+
+      # If we are 'export' just echo into file vs. replace existing
+      if [ "${item}" == "export" ]; then
+        replace="${item} ${profile[${item}]}"
+        ommit=1
+      else
+        pattern="^${item}=.*"
+        replace="${item}=${profile[${item}]}"
+        ommit=0
+      fi
+
+      if [ "${check}" == 0 ] ; then
+        info+=("INFO: Setting option (${replace}),")
+        if [ ${ommit} -eq 0 ]; then
+          str_replace "${file}" "${pattern}" "${replace}" "${ommit}"
+        else
+          echo "${replace}" >> ${file}
+        fi
+      fi
+
+      info+=("INFO: Validating option (${item}),")
+      if [ "$(grep ${pattern} ${file})" == "" ]; then
+        errors+=("ERROR: Could not validate option ${item}=${profile[${item}]},")
+      fi
+    fi
+  done
+
+  # Return errors
+  if [ "${#errors[@]}" != 0 ] ; then
+    errors+=("${info[@]}")
+    echo "${errors[@]}" && return 1
+  fi
+
+  # Expose information array
+  echo "${info[@]}"
+
+  # Return code
+  return 0
+}
+
+# Global options
+verbose=0
+check=0
+restore=0
+test=0
+interactive=0
+prog=$(basename $0)
+
+# Ensure we have permissions
+if [ $UID != 0 ] ; then
+  echo "${prog}: Requires root privileges"
+  exit 1
+fi
+
+# Set variables
+while getopts "ha:vcrtif:" OPTION ; do
+  case $OPTION in
+    h) usage && exit 1 ;;
+    a) author=$OPTARG ;;
+    f) file=$OPTARG ;;
+    v) verbose=1 ;;
+    c) check=1 ;;
+    r) restore=1 ;;
+    t) test=1 ;;
+    i) interactive=1 ;;
+    ?) usage && exit 1 ;;
+  esac
+done
+
+# Make sure we have an author if we are not restoring or validating
+if [[ "${author}" == "" ]] && [[ "${restore}" == 0 ]] && [[ "${check}" == 0 ]]; then
+  echo "${prog}: Must specify an author name (use -a <initials>)"
+  usage
+  exit 1
+fi
+
+# Robot, do work
+main "config_profile"
