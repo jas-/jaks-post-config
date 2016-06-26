@@ -1,0 +1,339 @@
+#!/bin/bash
+
+# RHEL package keyfile
+key_file="RPM-GPG-KEY-redhat-release"
+
+# RHEL repository path
+rhel_repo_path=/etc/yum.repos.d/
+
+# Mount path
+mnt_path=/var/tmp/repo/
+
+# Setup a path for binary tools (just in case)
+PATH=$PATH:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+
+# Make the ${mnt_path} if it doesn't exist
+if [ ! -d ${mnt_path} ]; then
+  mkdir -p ${mnt_path}
+fi
+
+# Local repository file contents
+# {VERSION} gets replaced with DVD ISO version
+read -d '' contents <<"EOF"
+[RHEL-{VERSION}]
+name=RHEL-{VERSION}
+baseurl:file://{PATH}
+enabled=1
+gpgcheck=1
+EOF
+
+# Debugging log
+log=/var/tmp/paths.log
+
+# Function helper for RHEL version & repo validation
+function ver2repo()
+{
+  # Copy args to a local scope
+  local mnt_path="${1}"
+
+  echo "ver2repo(): Path: ${mnt_path}" >> ${log}
+
+  # Make sure /etc/redhat-release exists
+  if [ ! -f /etc/redhat-release ]; then
+    echo "ver2repo(): Release: missing" >> ${log}
+    return 1
+  fi
+
+  # Obtain the current patch level to ensure we are matching the RPM repo
+  local ver="$(cat /etc/redhat-release |
+    awk '{if (match($0, /([0-9]\.[0-9]+)/, obj)){print obj[1]}}')"
+
+  echo "ver2repo(): Version: ${ver}" >> ${log}
+
+  # Make sure we have something for ${ver}
+  #if [[ "${ver}" == "" ]] && [[ "${ver}" =~ [0-9]+\.[0-9]+ ]]; then
+  if [ "${ver}" == "" ]; then
+    return 1
+  fi
+
+  # Search provided ${mnt_path} for a matching ${ver}
+  local repo="$(find ${mnt_path} -maxdepth 5 -type f -name media.repo -print | \
+    xargs grep "^name=.*${ver}" /dev/null | cut -d: -f1)"
+
+  echo "ver2repo(): Repo: ${repo}" >> ${log}
+
+  # Boolean return; if ${repo} is empty no match for ${ver} was found
+  if [[ "${repo}" != "" ]] && [[ -f ${repo} ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+# Attempt to import the RHEL repo GPG key
+import_gpg_key()
+{
+  # Re-assign ${1} to globally scoped ${mnt_path}
+  local mnt_path="${1}"
+
+  # Skip if a valid file not found
+  if [ ! -f ${mnt_path}/${key_file} ]; then
+    return 1
+  fi
+
+  echo "import_gpg_key(): Path: ${mnt_path}" >> ${log}
+
+  # Install the local public key from ${mnt_path}/${key_file}
+  $(rpm --import ${mnt_path}/${key_file} &>/dev/null)
+  if [ $? -ne 0 ]; then
+    echo "import_gpg_key(): Failed" >> ${log}
+    return 1
+  fi
+
+  # If the public key was imported then proceed return 0
+  return 0
+}
+
+# Search existing connected file systems
+search_fs()
+{
+  local haystack="/"
+  local needle="${key_file}"
+
+  # Set the root path to ${1} or / if empty
+  [ "${1}" != "" ] && haystack="${1}"
+  echo "search_fs(): Haystack: ${haystack}" >> ${log}
+
+  # Set the ${needle} to ${key_file} if ${2} is empty
+  [ "${2}" != "" ] && needle="${2}"
+  echo "search_fs(): Needle: ${needle}" >> ${log}
+
+  # Always skip existing GPG keys while searching for new a ${needle}
+  local paths=("$(find ${haystack} -maxdepth 5 -type f -name "${needle}" \
+    ! -path "/etc/pki/rpm-gpg/*")")
+
+  echo "search_fs(): Paths: ${#paths[@]}" >> ${log}
+  echo "  ALL: ${paths[@]}" >> ${log}
+
+  # If ${#paths[@]} less than or equal to 0 exit
+  if [ ${#paths[@]} -le 0 ]; then
+    return 1
+  fi
+
+  # Iterate ${paths[@]} and do a version check of GPG key with ver2repo()
+  for path in ${paths[@]}; do
+
+    # Skip if invalid directory
+    if [ ! -d $(dirname ${path}) ]; then
+      continue
+    fi
+
+    echo "search_fs(): Path: ${path}" >> ${log}
+
+    # If ver2repo ${path} == 0 then a matching RPM repository was found, return
+    $(ver2repo $(dirname ${path}))
+    if [ $? -eq 0 ]; then
+
+      echo "search_fs(): ver2repo(): Match ${path}" >> ${log}
+
+      # If something was found return 0 & the path of the ${path}
+      if [ "${path}" != "" ]; then
+        echo "$(dirname ${path})"
+        return 0
+      fi
+    fi
+  done
+
+  echo "" >> ${log}
+
+  return 1
+}
+
+# Iterate over block devices
+search_block_devices()
+{
+
+  # Obtain an array of disk devices as ${blockdevs[@]}
+  local blockdevs=($(ls -la /dev/ | sort -k 4 | awk '$10 ~ /[0-9]$/ \
+    && ($4 ~ /^cdrom$/ || $4 ~ /^disk$/){print "/dev/"$10}'))
+
+  echo "search_block_devices(): Block devices: ${#blockdevs[@]}" >> ${log}
+
+  # Error if ${#blockdevs[@]} -lt 1
+  if [ ${#blockdevs[@]} -lt 1 ]; then
+    return 1
+  fi
+
+  # Iterate ${blockdevs[@]} and mount to find the ${buildtools}
+  for dev in ${blockdevs[@]}; do
+
+    # Skip loop, rawct, dm-* & ram device inodes
+    if [[ "${dev}" =~ loop ]] || [[ "${dev}" =~ ram ]] ||
+        [[ "${dev}" =~ rawctl ]] || [[ "${dev}" =~ dm- ]]; then
+      continue
+    fi
+
+    # Look to see if ${dev} is currently mounted & skip if it is
+    local mnt=$(mount|grep ^${dev})
+    if [ "${mnt}" != "" ]; then
+      echo "search_block_devices(): Skipped (mounted): ${dev}" >> ${log}
+      continue
+    fi
+
+    # Mount & search for '${key_file}', skip if mount fails
+    local bogus=$(mount ${dev} ${mnt_path} &>/dev/null)
+    if [[ $? -ne 0 ]] || [[ "$(ls ${mnt_path})" == "" ]]; then
+      echo "search_block_devices(): Skipped (failed): ${dev}" >> ${log}
+      continue
+    fi
+
+    echo "search_block_devices(): Searching: ${dev}" >> ${log}
+
+    # Check for the folder ${mnt_path}/${key_file}
+    local haystack="$(search_fs "${mnt_path}")"
+    if [[ $? -eq 0 ]] && [[ "${haystack}" != "" ]]; then
+
+      echo "search_block_devices(): Found GPG key: ${dev}" >> ${log}
+
+      # Now make sure we have a valid folder
+      if [ -d ${haystack} ]; then
+        echo "${haystack}"
+        return 0
+      fi
+    fi
+
+    # Remove the mount while discarding errors
+    umount ${mnt_path} &>/dev/null
+
+  done
+
+  echo "" >> ${log}
+
+  return 1
+}
+
+
+# Find a repository based on the success/failure of importing the GPG key
+search_for_repo()
+{
+  # Set ${path} to empty
+  local path=
+
+  # Search for GPG key on current filesystem(s) first
+  path="$(search_fs)"
+  if [[ $? -eq 0 ]] && [[ "${path}" != "" ]]; then
+
+    echo "search_for_repo(): Path (local fs): ${path}" >> ${log}
+
+    # Attempt to import GPG key if ${path} found
+    import_gpg_key "${path}"
+    if [ $? -eq 0 ]; then
+
+      echo "search_for_repo(): GPG key imported: ${path}" >> ${log}
+
+      echo "${path}"
+      return 0
+    fi
+  fi
+
+  # Search all block device inodes for GPG key
+  path="$(search_block_devices)"
+  if [[ $? -eq 0 ]] && [[ "${path}" != "" ]]; then
+
+    echo "search_for_repo(): Path (block devices): ${path}" >> ${log}
+
+    # If ver2repo ${path} == 0 then a matching RPM repository was found, return
+    $(ver2repo ${path})
+    if [ $? -eq 0 ]; then
+
+      echo "search_for_repo(): ver2repo(): Match" >> ${log}
+
+      # Attempt to import GPG key if ${path} found
+      import_gpg_key "${path}"
+      if [ $? -eq 0 ]; then
+        echo "search_for_repo(): GPG key imported: ${path}" >> ${log}
+        echo "${path}"
+        return 0
+      fi
+    fi
+  fi
+
+  # Set our architecture to ensure accuracy
+  local arch=$(uname -p)
+
+  # Last ditch effort search for RHEL ISO file(s) matching the OS version
+  local iso="($(find ${path} -type f \
+    -name rhel-server*${ver}*${arch}*.iso|sort -u))"
+
+  # If ${#iso[@]} -gt 0 iterate and mount
+  if [ ${#iso[@]} -gt 0 ]; then
+
+    # Iterate ${iso[@]} and look for ${key_file}
+    for img in ${iso[@]}; do
+
+      # Skip if errors mounting
+      mt=$(mount -o loop ${img} ${mnt_path} &>/dev/null)
+      if [ $? -ne 0 ]; then
+        continue
+      fi
+
+      # Search ${tmt} for ${key_file}
+      path="$(search_fs "${mnt_path}")"
+      if [[ $? -eq 0 ]] && [[ "${path}" != "" ]]; then
+
+        # Attempt to import GPG key if ${path} found
+        import_gpg_key "${path}"
+        if [ $? -eq 0 ]; then
+          echo "${path}"
+          return 0
+        fi
+      fi
+    done
+  fi
+
+  echo "" >> ${log}
+
+  # Return 1 for failure in finding a RPM repository
+  return 1
+}
+
+# Create the repository for package installations
+create_repo()
+{
+  # See if we have a valid repository
+  local path="$(search_for_repo)"
+  if [ $? -eq 1 ]; then
+    return 1
+  fi
+
+  # Get the version again since we didn't bubble this up
+  if [ -f /etc/redhat-release ]; then
+    local ver="$(cat /etc/redhat-release|
+      awk '{if (match($0, /([0-9]\.[0-9]+)/, obj)){print obj[1]}}')"
+  fi
+
+  # Set the path & filename
+  local file="${rhel_repo_path}RHEL-${ver}.repo"
+
+  # Create the repo using ${path} & ${ver}
+  echo "${contents}" |
+    sed -e "s|{PATH}|${path}|g" \
+        -e "s|{VERSION}|${ver}|g" > ${file}
+}
+
+# Simple interface for creating the RHEL repo
+repo()
+{
+  local path="$(search_for_repo)"
+  if [[ $? -ne 1 ]] && [[ -d ${path} ]]; then
+    create_repo "${path}"
+
+    # Make sure we set ${path} for the RPM's associated with media.repo
+    path="$(dirname $(find ${path} -maxdepth 2 -mindepth 1 -type f \
+      -name yum*.rpm -print -quit))"
+
+    echo "${path}"
+    return 0
+  fi
+  return 1
+}
