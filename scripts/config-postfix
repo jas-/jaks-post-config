@@ -45,7 +45,7 @@ Configure the postfix service
 
   Options:
     -f  File to use
-    -d  Domain to use (i.e. pacificorp.us)
+    -d  Domain to use (i.e. domain.us)
 
   Validation:
     -c  Perform validation of change

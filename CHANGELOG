@@ -1,0 +1,41 @@
+commit 7c3df64907d70e25071516f40ec9fb24614289a4
+Author: Jas- <Jason.Gerfen@gmail.com>
+Date:   Sun Jun 26 09:32:44 2016 -0600
+
+    Added config-dns tool
+
+commit 8f862f5d18a04545f8e3c4072a5e192824e05848
+Author: Jas- <Jason.Gerfen@gmail.com>
+Date:   Sun Jun 26 09:27:36 2016 -0600
+
+    Added config-logs-syslog tool
+
+commit 2a5d7d040a7fcc004eead7e17e23644ee7172193
+Author: Jas- <Jason.Gerfen@gmail.com>
+Date:   Sun Jun 26 09:23:57 2016 -0600
+
+    Added config-ntp tool
+
+commit 530bf5c3c0da4e49fde6ac82bfa8bf337586bc43
+Author: Jas- <Jason.Gerfen@gmail.com>
+Date:   Sun Jun 26 09:21:46 2016 -0600
+
+    Added config-postfix tool
+
+commit e1e7be2f79e1ba94387dbe69db1c72a7433c56e3
+Author: Jas- <Jason.Gerfen@gmail.com>
+Date:   Sun Jun 26 09:21:13 2016 -0600
+
+    Added config-rhsm tool
+
+commit e13ba37cf9a8138af81294b450d503826b951baa
+Author: Jas- <Jason.Gerfen@gmail.com>
+Date:   Sun Jun 26 09:20:29 2016 -0600
+
+    Added rhel-packages library
+
+commit 25c909788c9124cf77f99d3dcb2e8c594b7f7dfe
+Author: Jas- <Jason.Gerfen@gmail.com>
+Date:   Sun Jun 26 09:15:52 2016 -0600
+
+    jaks-post-config: %post processing tools for jaks (Just Another Kickstart Script)
