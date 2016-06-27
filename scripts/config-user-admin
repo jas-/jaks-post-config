@@ -1,0 +1,408 @@
+#!/bin/bash
+
+# Associative array of files making up the passwd/shadow/group databases
+declare -A files
+files[passwd]=/etc/passwd
+files[shadow]=/etc/shadow
+files[group]=/etc/group
+
+# Array of key / value options for account
+declare -A acct
+acct[login]="admin"
+acct[uid]=1169
+acct[gid]=1
+acct[gecos]="Example Administrative user account"
+acct[home]=/export/home/admin
+acct[home_perms]=750
+acct[home_ssh_perms]=700
+acct[shell]=/sbin/nologin
+acct[expiration]=
+
+# Array of key / value options for ssh keys
+declare -A keys
+keys[id_rsa]=""
+keys[id_rsa.pub]=""
+keys[known_hosts]=""
+
+# Array of key / values for handling scheduled audits
+declare -A audits
+audits[rpath]=/var/tmp/unixbuild/unix/software/auditd/redhat/
+audits[path]=/usr/local/bin/unix/
+audits[file]=automated_audit_log_pusher
+audits[task]="{MIN} 0 * * * {PATH}{FILE} 5 >/dev/null 2>&1"
+
+# Get our current working directory
+cwd=$(dirname ${BASH_SOURCE[0]})
+
+# Setup a path for binary tools (just in case)
+PATH=$PATH:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+
+# Make sure our common libraries are available
+if [ ! -f "${cwd}/libs/common" ] ; then
+  echo "${prog}: Could not load libraries"
+  exit 1
+fi
+
+# Load our libs
+source ${cwd}/libs/common
+
+# Displays available arg list
+usage()
+{
+  cat <<EOF
+Usage $0 [options]
+
+Creates user/group for the addmadm service
+
+  Help:
+    -h  Show this message
+    -v  Enable verbosity mode
+
+  Required:
+    -a  Author name (required)
+
+  Options:
+    -p  Password file to use
+    -s  Shadow file to use
+    -g  Group file to use
+
+  Validation:
+    -c  Perform validation of change
+
+  Restoration options:
+    -r  Perform rollback of changes
+    -i  Interactive mode, to be used with -r
+
+  Development mode:
+    -t  Run in test mode (assumes test env)
+
+EOF
+}
+
+# Obtain current crontab entries and test for supplied pattern
+test_crontab()
+{
+  # Make local copy of ${1}
+  local item="${1}"
+
+  # Obtain an array of crontabs
+  local cron=("$(crontab -l)")
+
+  # Copy default seperator
+  oIFS="$IFS"
+
+  # Change default serperator
+  IFS=$'\n'
+
+  # Make sure we can iterate despite ${errors[@]} being non-empty
+  if [ ${#cron[@]} -gt 0 ]; then
+
+    # Set ${valid} = 0
+    local valid=0
+
+    # Iterate the crontabs
+    for crn in ${cron[@]}; do
+
+      # Compare ${crn} with ${item} & set ${item} = 1 (true) if present
+      if [ "${crn}" == "${item}" ]; then
+        local valid=1
+      fi
+    done
+  fi
+
+  echo ${valid}
+}
+
+config_acct_addmadm()
+{
+  # Error array
+  errors=()
+
+  # Global info array
+  info=()
+
+  # Iterate our array of files
+  for file in ${!files[@]}; do
+
+    i=$((i+1))
+
+    # Use test suite if enabled
+    if [ "${test}" == 1 ] ; then
+      files[${file}]=$(create_test "${cwd}/test/originals/$(basename ${files[${file}]})")
+      if [ $? != 0 ] ; then
+        errors+=("ERROR: Error working with test env for ${file} (${files[${file}]}")
+        echo "${errors[@]}" && return 1
+      fi
+    fi
+
+    # Ensure the file/path is a valid file
+    if [ ! -f ${files[${file}]} ]; then
+      errors+=("ERROR: File ${file} not found (${files[${file}]}),")
+      echo "${errors[@]}" && return 1
+    fi
+
+    # Perform restoration if specified
+    if [ "${restore}" == 1 ] ; then
+
+      info+=("$(restore "${files[${file}]}")")
+
+      # Check results & return if an error occured
+      if [ $? != 0 ]; then
+        echo "${info[@]}" && return 1
+      fi
+
+      # If its the last file in the ${files[@]} array exit success
+      if [ ${i} -eq ${#files[@]} ]; then
+        echo "${info[@]}" && return 0
+      fi
+    fi
+
+    # Backup file if we are making changes
+    if [[ "${check}" == 0 ]] && [[ "${restore}" == 0 ]] ; then
+
+      info+=("$(backup "${files[${file}]}" "${author}")")
+
+      # Check results & return if an error occured
+      if [ $? != 0 ]; then
+        echo "${info[@]}" && return 1
+      fi
+    fi
+  done
+
+  # Calculate <minute> for scheduled task to perform audit push
+  local minute=0
+  minute=$(expr 58 % $(ip addr|grep inet|grep -v "127.0.0.1\|inet6"|head -1|awk '{print $2}'|cut -d / -f 1|cut -d . -f 4) + 1)
+  if [ ${minute} -eq 0 ]; then
+    errors+=("ERROR: Could not determine scheduled time for log push,")
+  fi
+
+  # Modify ${audits[task]} with ${minute}, ${audits[path]} & ${audits[file]}
+  local item=$(echo "${audits[task]}" |
+          sed -e "s|{MIN}|${minute}|g" \
+              -e "s|{PATH}|${audits[path]}|g" \
+              -e "s|{FILE}|${audits[file]}|g")
+
+  # Create the specified account from ${acct[@]}
+  if [ "${check}" == 0 ]; then
+
+    # Make sure we have a valid path for the home directory
+    if [ ! -d $(dirname ${acct[home]}) ]; then
+      info+=("INFO: Creating $(dirname ${acct[home]}),")
+      mkdir -p -m 755 $(dirname ${acct[home]})
+    fi
+
+    # Create the account
+    info+=("INFO: Creating ${acct[login]} user account,")
+    result=$((useradd -c "${acct[gecos]}" -d ${acct[home]} -g ${acct[gid]} -m -u ${acct[uid]} -s ${acct[shell]} ${acct[login]}) 2>&1)
+    if [[ $? != 0 ]] && [[ "${result}" != "" ]]; then
+      if [[ ! "${result}" =~ exists ]]; then
+        errors+=("ERROR: An error occured creating new account (${result}),")
+      fi
+    fi
+
+    # Set permissions
+    info+=("INFO: Setting ${acct[home]} permssions to ${acct[home_perms]},")
+    res=$(chmod -R ${acct[home_perms]} ${acct[home]})
+    if [ $? != 0 ]; then
+      errors+=("ERROR: Could not set permissions for ${acct[home]},")
+    fi
+
+    # Create the .ssh folder if it doesn't exist
+    if [ ! -d ${acct[home]}/.ssh ]; then
+      mkdir -p -m ${acct[home_ssh_perms]} ${acct[home]}/.ssh
+    fi
+
+    info+=("INFO: Setting ${acct[home]}/.ssh permssions to ${acct[home_ssh_perms]},")
+    res=$(chmod -R ${acct[home_ssh_perms]} ${acct[home]}/.ssh)
+    if [ $? != 0 ]; then
+      errors+=("ERROR: Could not set permissions for ${acct[home]}/.ssh,")
+    fi
+
+    # Create files for values in ${keys[@]}
+    for key in ${!keys[@]}; do
+      info+=("INFO: Creating ${acct[login]} ${key},")
+
+      echo "${keys[${key}]}" > ${acct[home]}/.ssh/${key}
+
+      info+=("INFO: Setting permissions for ${acct[login]} ${key},")
+      chown ${acct[uid]}:${acct[gid]} ${acct[home]}/.ssh/${key}
+      chmod ${acct[home_ssh_perms]} ${acct[home]}/.ssh/${key}
+    done
+
+    # Test for existence of ${audits[rpath]}${audits[file]}
+    if [ ! -f ${audits[rpath]}${audits[file]} ]; then
+      errors+=("ERROR: ${audits[file]} cannot be found @ ${audits[rpath]},")
+    fi
+
+    # Copy ${audits[rpath]}${audits[file]} to ${audits[path]}${audits[file]}
+    if [ -f ${audits[rpath]}${audits[file]} ]; then
+      info+=("INFO: Copying ${audits[file]} to ${audits[path]},")
+
+      # Make sure the path exists
+      if [ ! -d ${audits[path]} ]; then
+        mkdir -p ${audits[path]}
+      fi
+
+      # Copy ${audits[file]}
+      cp -p ${audits[rpath]}${audits[file]} ${audits[path]}${audits[file]}
+    fi
+
+    # Create scheduled task using the modified ${item}
+    if [ $(test_crontab "${item}") -ne 1 ]; then
+      bogus=$((crontab -l 2>/dev/null; echo "${item}") | crontab -)
+    fi
+  fi
+
+  # Query for the ${acct[login]} name and create an array of it
+  IFS=':' read -a obj <<< $(awk -v user="${acct[login]}" -F: '($1 == user){print}' ${files[passwd]}|tr ' ' '-')
+  IFS=' ' read -a haystack <<< $(echo ${obj[@]})
+
+  # Make sure we have a valid ${acct[login]} present from ${haystack}
+  info+=("INFO: Validating ${acct[login]} account,")
+  if [ ${#haystack[@]} -eq 0 ]; then
+    errors+=("ERROR: An error occured trying to find ${acct[login]},")
+  fi
+
+  # Ensure ${haystack[0] matches ${acc[login]}
+  if [ "${haystack[0]}" != "${acct[login]}" ]; then
+    errors+=("ERROR: Login name does not match ${acct[login]} (${haystack[0]}),")
+  fi
+
+  # Ensure ${haystack[2] matches ${acc[uid]}
+  info+=("INFO: Validating UID (${acct[uid]}),")
+  if [ "${haystack[2]}" != "${acct[uid]}" ]; then
+    errors+=("ERROR: UID does not match ${acct[uid]} (${haystack[2]}),")
+  fi
+
+  # Ensure ${haystack[3] matches ${acc[gid]}
+  info+=("INFO: Validating GID (${acct[gid]}),")
+  if [ "${haystack[3]}" != "${acct[gid]}" ]; then
+    errors+=("ERROR: GID does not match ${acct[gid]} (${haystack[3]}),")
+  fi
+
+  # Ensure ${haystack[4] matches ${acc[gecos]}
+  info+=("INFO: Validating gecos field (${acct[gecos]}),")
+  if [ "$(echo ${haystack[4]}|tr '-' ' ')" != "${acct[gecos]}" ]; then
+    errors+=("ERROR: Gecos does not match ${acct[gecos]} ($(echo ${haystack[4]}|tr '-' ' ')),")
+  fi
+
+  # Make sure we have a valid path for the home directory
+  if [ ! -d $(dirname ${acct[home]}) ]; then
+    errors+=("ERROR: Home directory does not exist ($acct[home]}),")
+  else
+    # Ensure ${haystack[5] matches ${acc[home]}
+    info+=("INFO: Validating home directory (${acct[home]}),")
+    if [ "${haystack[5]}" != "${acct[home]}" ]; then
+      errors+=("ERROR: Home directory does not match ${acct[home]} (${haystack[5]}),")
+    fi
+  fi
+
+  # Ensure ${haystack[6] matches ${acc[shell]}
+  info+=("INFO: Validating shell (${acct[shell]}),")
+  if [ "${haystack[6]}" != "${acct[shell]}" ]; then
+    errors+=("ERROR: Home directory does not match ${acct[shell]} (${haystack[6]}),")
+  fi
+
+  # Make sure we have a valid path for the home directory
+  if [ ! -d $(dirname ${acct[home]}) ]; then
+    errors+=("ERROR: Home directory does not exist ($acct[home]}),")
+  else
+    # Verify permissions on ${acct[home]} using ${acct[home_perms]}
+    info+=("INFO: Validating home permissions (${acct[home_perms]}),")
+    perms=$(stat -c %a ${acct[home]})
+    if [ "${perms}" != "${acct[home_perms]}" ]; then
+      errors+=("ERROR: Permissions for ${acct[home]} are invalid (${perms} != ${acct[home_perms]}),")
+    fi
+  fi
+
+  # Make sure we have a valid path for the home directory
+  if [ ! -d $(dirname ${acct[home]}/.ssh) ]; then
+    errors+=("ERROR: Home directory does not exist ($acct[home]}),")
+  else
+    # Verify permissions on ${acct[home]}/.ssh using ${acct[home_ssh_perms]}
+    info+=("INFO: Validating ssh folder permissions (${acct[home_ssh_perms]}),")
+    perms=$(stat -c %a ${acct[home]}/.ssh)
+    if [ "${perms}" != "${acct[home_ssh_perms]}" ]; then
+      errors+=("ERROR: Permissions for ${acct[home]}/.ssh are invalid (${perms} != ${acct[home_ssh_perms]}),")
+    fi
+
+    # Iterate ${keys[@]} & ensure file & permissions are accurate
+    for key in ${!keys[@]}; do
+
+      info+=("INFO: Validating file existence (${key}),")
+      if [ ! -f ${acct[home]}/.ssh/${key} ]; then
+        errors+=("ERROR: File ${key} is missing for ${acct[login]},")
+      else
+        info+=("INFO: Validating file contents (${key}),")
+        if [ "$(grep -e "${keys[${key}]}" ${acct[home]}/.ssh/${key})" == "" ]; then
+          errors+=("ERROR: Contents for ${key} is invalid,")
+        fi
+
+        # Verify permissions on ${acct[home]}/.ssh using ${acct[home_ssh_perms]}
+        info+=("INFO: Validating permissions on ${key} (${acct[home_ssh_perms]}),")
+        perms=$(stat -c %a ${acct[home]}/.ssh/${key})
+        if [ "${perms}" != "${acct[home_ssh_perms]}" ]; then
+          errors+=("ERROR: Permissions for ${key} are invalid (${perms} != ${acct[home_ssh_perms]}),")
+        fi
+      fi
+    done
+  fi
+
+  # If ${valid} = 0 (false) then return an error regarding crontab
+  if [ $(test_crontab "${item}") -eq 0 ]; then
+    errors+=("ERROR: Could not locate scheduled task for log sync,")
+  fi
+
+  # Return errors
+  if [ "${#errors[@]}" != 0 ] ; then
+    errors+=("${info[@]}")
+    echo "${errors[@]}" && return 1
+  fi
+
+  # Expose information array
+  echo "${info[@]}"
+
+  # Return code
+  return 0
+}
+
+# Global options
+verbose=0
+check=0
+restore=0
+test=0
+interactive=0
+prog=$(basename $0)
+
+# Ensure we have permissions
+if [ $UID != 0 ] ; then
+  echo "${prog}: Requires root privileges"
+  exit 1
+fi
+
+# Set variables
+while getopts "ha:vcrtip:s:g:" OPTION ; do
+  case $OPTION in
+    h) usage && exit 1 ;;
+    a) author=$OPTARG ;;
+    p) files[passwd]=$OPTARG ;;
+    s) files[shadow]=$OPTARG ;;
+    g) files[group]=$OPTARG ;;
+    v) verbose=1 ;;
+    c) check=1 ;;
+    r) restore=1 ;;
+    t) test=1 ;;
+    i) interactive=1 ;;
+    ?) usage && exit 1 ;;
+  esac
+done
+
+# Make sure we have an author if we are not restoring or validating
+if [[ "${author}" == "" ]] && [[ "${restore}" == 0 ]] && [[ "${check}" == 0 ]]; then
+  echo "${prog}: Must specify an author name (use -a <initials>)"
+  usage
+  exit 1
+fi
+
+# Robot, do work
+main "config_acct_addmadm"
