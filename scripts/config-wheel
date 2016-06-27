@@ -7,7 +7,7 @@ file=/etc/group
 group="wheel"
 
 # Array for wheel members
-members=(p76170 p33131 p36623 p22391 p30244 p30925 p21045 p26747)
+members=()
 
 # Get our current working directory
 cwd=$(dirname ${BASH_SOURCE[0]})
@@ -124,7 +124,7 @@ config_wheel()
 
       # Perform intersection of ${members[@]} with ${haystack[@]}
       results=($(comm -13 <(printf '%s\n' "${haystack[@]}"|sort -u) <(printf '%s\n' "${members[@]}"|sort -u)))
-      
+
     else
 
       # If ${#haystack[@]} > 0 but ${#members[@]} <= 0 do this...
@@ -168,7 +168,7 @@ config_wheel()
 
     # Perform intersection of ${members[@]} with ${haystack[@]}
     results=($(comm -13 <(printf '%s\n' "${haystack[@]}"|sort -u) <(printf '%s\n' "${members[@]}"|sort -u)))
-      
+
   else
 
     # If ${#haystack[@]} > 0 but ${#members[@]} <= 0 do this...
