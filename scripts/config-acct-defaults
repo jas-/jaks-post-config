@@ -11,6 +11,8 @@ acct[PASS_MAX_DAYS]=60
 acct[PASS_MIN_DAYS]=0
 acct[PASS_MIN_LEN]=8
 acct[LOGIN_RETRIES]=10
+acct[SU_WHEEL_ONLY]='yes'
+acct[SYSLOG_SU_ENAB ]='yes'
 
 # Get our current working directory
 cwd=$(dirname ${BASH_SOURCE[0]})
